@@ -1,0 +1,47 @@
+# Physical assumptions; the variable-head table is a sensitivity scenario.
+head_model: storage_sensitivity  # fixed reproduces the original typical-head model
+reservoir_ids: [WDD, BHT, XLD, XJB, THR]
+level_bounds_m:
+  WDD: [945, 975]
+  BHT: [765, 825]
+  XLD: [540, 600]
+  XJB: [370, 380]
+  THR: [145, 175]
+efficiency: 0.90
+water_density_kg_m3: 1000.0
+gravity_m_s2: 9.81
+timestep_seconds: 86400.0
+release_mapping: quadratic
+# Release feasibility propagation. backward = original downstream-to-upstream
+# compatibility pass; forward_local = ablation with each reservoir bounded only
+# by its own storage interval. Both keep every other constraint unchanged.
+feasibility_mode: backward
+# End-of-episode storage is free within the daily operating bounds.
+# Supplied permitted levels for the state reached after each action date.
+use_daily_level_limits: true
+# Hard end-of-day water-level changes. The TGR refill rule overrides only the
+# upward limit; downward movement still follows the dry/flood seasonal limit.
+daily_level_ramp_limits:
+  enabled: true
+  constant:
+    WDD: {rise_m_per_day: 1.0, fall_m_per_day: 1.0}
+    BHT: {rise_m_per_day: 2.0, fall_m_per_day: 2.0}
+    XLD: {rise_m_per_day: 3.0, fall_m_per_day: 3.0}
+    XJB: {rise_m_per_day: 4.0, fall_m_per_day: 4.0}
+  seasonal:
+    THR:
+      dry_months: [1, 2, 3, 4, 5, 10, 11, 12]
+      dry_m_per_day: 0.6
+      flood_months: [6, 7, 8, 9]
+      flood_m_per_day: 2.0
+      refill_months: [8, 9, 10]
+      refill_max_rise_m_per_day: 3.0
+# Reference ecological-flow thresholds from paper Table A.1.
+load_service_requirements: true
+# Applies directly to the source CSV; 1 uses the reference values.
+ecological_flow_scale: 1 #生态流量
+# Requirement-relative shortfalls averaged over each fixed active reservoir set.
+# Unit weights are prespecified tradeoffs, not calibrated or monetary costs.
+reward_penalties:
+  enabled: true
+  ecological_flow_weight: 1.0
