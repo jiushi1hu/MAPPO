@@ -8,6 +8,7 @@ or prove that a saved state was unavoidable.
 import numpy as np
 
 from harl.envs.cascade_reservoir.data_loader import IDS
+from harl.envs.cascade_reservoir.dispatch_kernel import release_from_normalized_action
 
 
 CLASSIFICATION_DEFINITIONS = {
@@ -133,7 +134,8 @@ class _TransitionAnalysis:
         if low > high+1e-8 or low < -1e-8:
             raise ValueError('Invalid feasible release interval')
         forced = bool(np.asarray(self.row['controls'])[i] == 0.)
-        releases = np.full(self.bins, actual) if forced else low+self.grid**2*(high-low)
+        releases = (np.full(self.bins, actual) if forced else
+                    release_from_normalized_action(low, high, self.grid))
         best = int(np.argmax(releases))
         witness = self.replay(i, float(self.grid[best]), float(releases[best]))
         maximum = float(witness['release'][i])
@@ -163,8 +165,7 @@ class _TransitionAnalysis:
             meeting_end_storage_delta_m3=float(witness['storage_end'][i]-self.row['storage_end'][i]))
         record.update(self.witness_fields(i, 'minimum_meeting', witness))
         continuous_release = actual if forced else min(high, max(low, threshold))
-        normalized = (.5 if forced else float(np.sqrt(np.clip(
-            (continuous_release-low)/(high-low), 0., 1.))))
+        normalized = .5 if forced else float(np.clip((continuous_release-low)/(high-low), 0., 1.))
         witness = self.replay(i, normalized, continuous_release)
         if threshold-float(witness['release'][i]) > tolerance+1e-7:
             raise DispatchDiagnosticError('Continuous meeting witness fails its requirement')

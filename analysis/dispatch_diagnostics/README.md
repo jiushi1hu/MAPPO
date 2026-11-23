@@ -37,7 +37,7 @@ scheduling window. Generation, power and head remain ordinary physical metadata.
 `same_day_policy_alternative` means another configured command meets the
 threshold from the saved starting state. `same_state_release_limit` means the
 maximum physically admissible release cannot meet it. Inactive thresholds and
-nonviolating days are counted separately. A quadratic grid can require more
+nonviolating days are counted separately. A discrete grid can require more
 release than the continuous minimum; this quantization overshoot is recorded.
 Because the grid includes both feasible endpoints, it cannot miss an attainable
 one-sided ecological threshold entirely.

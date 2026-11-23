@@ -20,7 +20,7 @@ from harl.envs.cascade_reservoir.daily_change_diagnostics import (
     DAILY_CHANGE_FIELDS, LEVEL_BOUND_FIELDS, STATISTICS_FIELDS, daily_change_output_paths,
     flatten_output_paths, write_daily_change_csv, write_level_change_statistics_csv)
 from harl.envs.cascade_reservoir.ecological_violations import (
-    EcologicalViolationRecorder, write_ecological_violations)
+    EcologicalViolationRecorder, write_ecological_results)
 from harl.envs.cascade_reservoir.level_ramp import (
     RampConflictWriter, ensure_ramp_conflict_csv)
 from harl.runners.cascade_mappo_runner import (
@@ -279,13 +279,13 @@ def run_parallel_experiment(data, physical, config, args):
     daily_change_directory=(None if not daily_change_paths_by_seed else
         next(iter(daily_change_paths_by_seed.values()))['csv'].parent)
     results_directory = daily_change_output_directory(args.plot_output, args.episode_log)
-    violation_path = (None if args.skip_final_evaluation or results_directory is None else
-                      results_directory/'ecological_violations.csv')
+    ecological_paths = ([] if args.skip_final_evaluation or results_directory is None else
+                        [results_directory/name for name in ('ecological_violations.csv', 'ecological_normal.csv')])
     periodic_window = select_periodic_window(data)
     output_paths=(([] if args.episode_log is None else [args.episode_log])+
                   list(daily_paths.values())+flatten_output_paths(daily_change_paths_by_seed)+
                   list(figure_paths.values())+list(trajectory_paths.values())+
-                  list(checkpoint_dirs.values())+([] if violation_path is None else [violation_path]))
+                  list(checkpoint_dirs.values())+ecological_paths)
     if len({path.resolve() for path in output_paths}) != len(output_paths):
         raise ValueError('Experiment output paths must be distinct')
     for path in output_paths:
@@ -487,7 +487,8 @@ def run_parallel_experiment(data, physical, config, args):
         if not args.skip_final_evaluation:
             try:
                 for runner in runners:
-                    recorder = EcologicalViolationRecorder(runner.seed, data.service_requirements)
+                    recorder = EcologicalViolationRecorder(runner.seed, data.service_requirements,
+                                                           record_normal=bool(ecological_paths))
                     rows = runner.final_evaluation(transition_observer=recorder.capture)
                     evaluations.extend(rows)
                     shortfalls = rows[0]['service_shortfalls']['ecological_flow']
@@ -498,9 +499,11 @@ def run_parallel_experiment(data, physical, config, args):
                     write_artifact_manifest(artifact_manifest_path, metadata['provenance'],
                         [path for path in [args.episode_log] if path is not None and path.exists()])
                 raise
-        if violation_path is not None:
-            write_ecological_violations(violation_path, violation_recorders)
+        if ecological_paths:
+            violation_path, normal_path = ecological_paths
+            write_ecological_results(violation_path, normal_path, recorders=violation_recorders)
             print('Ecological-flow violations saved to '+str(violation_path.resolve()), flush=True)
+            print('Normal ecological-flow records saved to '+str(normal_path.resolve()), flush=True)
         if daily_change_paths_by_seed:
             daily_change_files=save_daily_change_outputs(
                 runners, daily_change_paths_by_seed)
@@ -557,7 +560,7 @@ def run_parallel_experiment(data, physical, config, args):
             generated=([args.episode_log] if args.episode_log is not None else []) + \
                 list(daily_paths.values())+flatten_output_paths(daily_change_paths_by_seed) + \
                 list(figure_paths.values())+list(trajectory_paths.values())+list(checkpoint_dirs.values()) + \
-                ([] if violation_path is None else [violation_path])
+                ecological_paths
             write_artifact_manifest(artifact_manifest_path,metadata['provenance'],generated)
             if args.episode_log is not None:
                 verify_artifact_manifest(artifact_manifest_path)

@@ -73,6 +73,11 @@ def _backward(storage, external, storage_lower, storage_upper, release_cap, dt):
     return lower, upper, conflicts
 
 
+def release_from_normalized_action(lower, upper, action):
+    """Linearly interpolate a feasible release for a normalized action."""
+    return lower + action * (upper - lower)
+
+
 def dispatch_release(storage, external, actions, storage_lower, storage_upper,
                      release_cap, dt, feasibility_mode=DEFAULT_FEASIBILITY_MODE):
     """Return release dispatch for independent rows, each with five reservoirs.
@@ -134,7 +139,7 @@ def dispatch_release(storage, external, actions, storage_lower, storage_upper,
         executed[collapsed, i] = .5
         midpoint = np.minimum(cap[:, i], np.maximum(0., .5*(low[:, i]+high[:, i])))
         release[:, i] = np.where(collapsed, midpoint,
-                                 low[:, i]+executed[:, i]**2*(high[:, i]-low[:, i]))
+                                 release_from_normalized_action(low[:, i], high[:, i], executed[:, i]))
     return dict(inflow=inflow, release=release, low=low, high=high,
                 controls=controls, actions=executed, empty_interval=empty,
                 forced_interval=(controls == 0),

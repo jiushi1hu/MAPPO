@@ -97,7 +97,7 @@ For categorical action k among K commands:
 
 ```text
 u = k / (K - 1)
-release = feasible_low + u² * (feasible_high - feasible_low)
+release = feasible_low + u * (feasible_high - feasible_low)
 ```
 
 Feasible release intervals enforce storage bounds, daily level-ramp limits,
@@ -213,9 +213,9 @@ change storage trajectory.
 
 ## Generate the figures
 
-Use `--figures-only` with a fresh output stem to save the PNGs and one
-`ecological_violations.csv` beside them. The trajectory figure shows the first
-configured seed. The CSV combines all seeds' held-out violations.
+Use `--figures-only` with a fresh output stem to save the PNGs and the held-out
+`ecological_violations.csv` and `ecological_normal.csv` beside them. Both CSVs
+combine records across evaluated seeds.
 
 ```bash
 run_dir="runs/mappo_$(date +%Y%m%d_%H%M%S)"
@@ -251,12 +251,15 @@ metric. Training uses the per-reservoir mixed rewards.
 
 ## Held-out ecological-flow violations
 
-Each CSV row records one reward-defined ecological-flow violation. A violation
+Each row of `ecological_violations.csv` records one reward-defined violation. A violation
 is unavoidable when the dispatcher's maximum effective release falls short
 beyond the reward tolerance. Otherwise it is avoidable given the same day's
 conditions. A forced interval has one attainable release. The console shows
 counts, rates per active requirement day, and deficit volumes by reservoir and
 classification for each seed.
+
+`ecological_normal.csv` uses the same columns for reservoir-days with zero
+reward-defined deficit. Zero thresholds identify inactive requirements.
 
 ## Daily-change diagnostics
 

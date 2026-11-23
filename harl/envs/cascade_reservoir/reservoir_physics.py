@@ -10,8 +10,8 @@ class ReservoirPhysics:
     def __init__(self, data, config):
         self.data = data
         self.config = dict(config)
-        if config.get("release_mapping", "quadratic") != "quadratic":
-            raise ValueError("This experiment uses quadratic normalized-action mapping")
+        if config.get("release_mapping", "linear") != "linear":
+            raise ValueError("This experiment uses linear normalized-action mapping")
         self.dt = float(config["timestep_seconds"])
         if self.dt != 86400.0:
             raise ValueError("This model is daily")

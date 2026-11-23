@@ -158,6 +158,7 @@ def after_update(runner, before):
         require_finite('actor {} ratios'.format(i), ratio.cpu().numpy())
         require_finite('actor {} KL'.format(i), kl.cpu().numpy())
         sampled = action[active]/(new.probs.shape[-1]-1)
+        mean_u = float(mean.mean())
         result['actors'].append(dict(agent=i, active_samples=int(active.sum()),
             **update,
             entropy=float(new.entropy()[active].mean()),
@@ -171,9 +172,9 @@ def after_update(runner, before):
             policy_kl=float(kl.mean().clamp(min=0)),
             ratio_min=float(ratio.min()),ratio_max=float(ratio.max()),
             clip_fraction=float(((ratio<1.-actor.clip_param)|(ratio>1.+actor.clip_param)).float().mean()),
-            mean_u=float(mean.mean()),std_u=float(variance.sqrt().mean()),
-            modal_mapping_fraction=float((deterministic**2).mean()),
-            expected_sampled_mapping_fraction=float((mean**2+variance).mean())))
+            mean_u=mean_u,std_u=float(variance.sqrt().mean()),
+            modal_mapping_fraction=float(deterministic.mean()),
+            expected_sampled_mapping_fraction=mean_u))
     return result
 
 

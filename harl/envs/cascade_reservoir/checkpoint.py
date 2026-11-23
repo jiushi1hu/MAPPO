@@ -486,7 +486,7 @@ class FrozenCascadePolicy:
                     effective_action_index=int(transition['actions'][i]),
                     action_overridden=int((step, name) in overrides), controllable=int(transition['controls'][i]),
                     normalized_action=float(transition['normalized_actions'][i]),
-                    mapping_fraction=float(transition['normalized_actions'][i]**2),
+                    mapping_fraction=float(transition['normalized_actions'][i]),
                     policy_action_probability=float(distribution.probs[0, policy_actions[i]]),
                     command_probability=float(distribution.probs[0, commands[i]]),
                     command_log_probability=float(distribution.log_probs(torch.tensor([[commands[i]]])).item()),

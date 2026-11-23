@@ -174,7 +174,7 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
     feasibility = FeasibilityRecorder(env.physics.feasibility_mode)
     energy, spill, residual = 0., 0., 0.
     energy_by_reservoir, spill_by_reservoir = np.zeros(5), np.zeros(5)
-    action_sum, mapped_sum, active_count = np.zeros(5), np.zeros(5), np.zeros(5)
+    action_sum, active_count = np.zeros(5), np.zeros(5)
     head_sum, head_min, head_max = np.zeros(5), np.full(5, np.inf), np.full(5, -np.inf)
     for actor in actors:
         actor.prep_rollout()
@@ -204,7 +204,6 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
             energy_by_reservoir += row['energy']
             spill_by_reservoir += row['spill']*env.physics.dt
             action_sum += row['normalized_actions']*row['controls']
-            mapped_sum += row['normalized_actions']**2*row['controls']
             active_count += row['controls']
             head_sum += row['net_head_m']
             head_min = np.minimum(head_min, row['net_head_m'])
@@ -248,12 +247,12 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
     result['storage_trajectory'] = dict(initial_m3=initial.tolist(),
         final_m3=env.storage.tolist(), change_m3=result['storage_change_m3'])
     if diagnostics:
+        mean_u = (action_sum/np.maximum(active_count, 1)).tolist()
         result.update(energy_by_reservoir_TWh=(energy_by_reservoir/1e6).tolist(),
             spill_by_reservoir_billion_m3=(spill_by_reservoir/1e9).tolist(),
             end_storage_fraction=((env.storage-data.vmin)/(data.vmax-data.vmin)).tolist(),
             total_storage_depletion_billion_m3=float((initial-env.storage).sum()/1e9),
-            mean_u=(action_sum/np.maximum(active_count, 1)).tolist(),
-            mean_mapping_fraction=(mapped_sum/np.maximum(active_count, 1)).tolist(),
+            mean_u=mean_u, mean_mapping_fraction=mean_u.copy(),
             active_days=active_count.astype(int).tolist(),
             mean_net_head_m=(head_sum/(env.stop-env.start)).tolist(),
             min_net_head_m=head_min.tolist(), max_net_head_m=head_max.tolist())

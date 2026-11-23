@@ -11,7 +11,7 @@ efficiency: 0.90
 water_density_kg_m3: 1000.0
 gravity_m_s2: 9.81
 timestep_seconds: 86400.0
-release_mapping: quadratic
+release_mapping: linear
 # Release feasibility propagation. backward = original downstream-to-upstream
 # compatibility pass; forward_local = ablation with each reservoir bounded only
 # by its own storage interval. Both keep every other constraint unchanged.
