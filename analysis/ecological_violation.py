@@ -126,7 +126,7 @@ def train_checkpoints(root, seeds, episodes, log=print):
     command = [sys.executable, str(TRAIN_SCRIPT), '--episodes', str(episodes),
                '--seeds', *[str(seed) for seed in seeds],
                '--episode-log', str(episode_log), '--save-checkpoints',
-               '--skip-final-evaluation', '--eval-interval', '1000', '--no-plot']
+               '--skip-final-evaluation', '--no-plot']
     log('Training missing seeds {} for {} episodes ({} updates per seed).'.format(
         list(seeds), episodes, episodes//TRAIN_ENVIRONMENTS))
     log('  '+' '.join(command))

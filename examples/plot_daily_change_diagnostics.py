@@ -3,8 +3,10 @@ import argparse
 import csv
 from datetime import date
 import math
+import os
 from pathlib import Path
 import sys
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 
@@ -134,57 +136,153 @@ def load_daily_change_csv(path):
 
 
 def make_operation_figure(series_by_label):
-    """Plot levels, effective permitted bounds and release in episode order."""
+    """Plot one column per recorded seed, with consistent scales by reservoir."""
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    from matplotlib.ticker import MaxNLocator
 
-    figure, axes = plt.subplots(len(IDS), 2*len(series_by_label), sharex='col',
-                                squeeze=False, figsize=(7*len(series_by_label), 12),
-                                constrained_layout=True)
-    for column, (label, series) in enumerate(series_by_label.items()):
+    if not series_by_label:
+        raise ValueError('No recorded held-out trajectories to plot')
+    plot_fields = ('levels', 'releases', *LEVEL_BOUND_FIELDS)
+    by_label = {}
+    seen_seeds = set()
+    for label, series in series_by_label.items():
+        dates = series['dates']
+        if not len(dates) or series['seed'] in seen_seeds:
+            raise ValueError('Trajectory plots require nonempty data for distinct seeds')
+        seen_seeds.add(series['seed'])
         if any(name not in series for name in LEVEL_BOUND_FIELDS):
             raise ValueError('Trajectory plots require both permitted level bounds')
-        lower, upper = (np.asarray(series[name]) for name in LEVEL_BOUND_FIELDS)
-        days = np.arange(1, len(series['dates'])+1)
-        years = np.asarray(series['years'])
+        values = {name: np.asarray(series[name], dtype=float) for name in plot_fields}
+        if any(matrix.shape != (len(dates), len(IDS)) or not np.isfinite(matrix).all()
+               for matrix in values.values()):
+            raise ValueError('Trajectory data must contain one finite value per day and reservoir')
+        by_label[label] = dict(values, dates=dates)
+
+    levels = np.concatenate([series[name] for series in by_label.values()
+                             for name in ('levels', *LEVEL_BOUND_FIELDS)])
+    releases = np.concatenate([series['releases'] for series in by_label.values()])
+    level_min, level_max = levels.min(axis=0), levels.max(axis=0)
+    release_min, release_max = releases.min(axis=0), releases.max(axis=0)
+    level_pad = np.maximum((level_max-level_min)*.12, .25)
+    release_pad = np.maximum((release_max-release_min)*.08, 1.)
+
+    level_color, bound_color, release_color = '#255eb0', '#637995', '#84bb9b'
+    flood_color, boundary_color = '#eeeef0', '#737373'
+    columns = len(by_label)
+    width = max(10., 9.*columns+1.)
+    figure, axes = plt.subplots(len(IDS), columns, sharex='col', squeeze=False, figsize=(width, 14))
+    figure.subplots_adjust(left=.86/width, right=1-.87/width, bottom=.080,
+                           top=.900, wspace=.27, hspace=.18)
+    figure.suptitle('Held-out operation trajectories', y=.981)
+    figure.legend(handles=[
+        Line2D([], [], color=level_color, label='Water level'),
+        Line2D([], [], color=bound_color, ls='--', lw=.8, label='Permitted bounds'),
+        Line2D([], [], color=release_color, label='Executed release'),
+        Patch(facecolor=flood_color, edgecolor='none', label='June–September'),
+        Line2D([], [], color=level_color, marker='o', ls='none', label='Source-year end'),
+    ], loc='upper center', bbox_to_anchor=(.5, .954), ncol=5, frameon=False, fontsize=9)
+
+    for column, (label, series) in enumerate(by_label.items()):
+        dates = series['dates']
+        days = np.arange(1, len(dates)+1)
+        years = np.asarray([day.year for day in dates])
         starts = np.r_[0, np.flatnonzero(np.diff(years))+1]
+        ends = np.r_[starts[1:], len(dates)]-1
+        flood_days = [6 <= day.month <= 9 for day in dates]
+        flood_edges = np.flatnonzero(np.diff(flood_days, prepend=False, append=False))+.5
+        lower, upper = (series[name] for name in LEVEL_BOUND_FIELDS)
+
         for index, reservoir in enumerate(IDS):
-            level_ax, release_ax = axes[index, 2*column:2*column+2]
-            level_ax.fill_between(days, lower[:, index], upper[:, index],
-                                  color='#bfdbfe', label='Permitted bounds')
-            level_ax.plot(days, series['levels'][:, index], color='#1e3a8a', lw=0.85,
-                          label='End-of-day level')
-            release_ax.plot(days, series['releases'][:, index], color='#047857', lw=0.85)
-            level_ax.set_ylabel(reservoir+' level (m)')
-            release_ax.set_ylabel(reservoir+' release (m³/s)')
-            for ax in (level_ax, release_ax):
-                for start in starts[1:]:
-                    ax.axvline(days[start], color='0.7', lw=0.7)
-                ax.grid(alpha=0.2)
-        axes[0, 2*column].set_title(label+' · Water level')
-        axes[0, 2*column+1].set_title(label+' · Executed release')
-        axes[0, 2*column].legend(fontsize=8)
-        for ax in axes[-1, 2*column:2*column+2]:
-            ax.set_xticks(days[starts], years[starts])
-            ax.set_xlabel('Source year in episode order')
-    figure.suptitle('Held-out operation trajectories')
+            level_ax = axes[index, column]
+            release_ax = level_ax.twinx()
+            release_ax.set_zorder(level_ax.get_zorder()-1)
+            level_ax.patch.set_visible(False)
+            for start, end in zip(flood_edges[::2], flood_edges[1::2]):
+                release_ax.axvspan(start, end, color=flood_color, lw=0, zorder=0)
+            release_ax.plot(days, series['releases'][:, index], color=release_color, lw=.85)
+            level_ax.plot(days, lower[:, index], '--', color=bound_color, lw=.65, zorder=2)
+            level_ax.plot(days, upper[:, index], '--', color=bound_color, lw=.65, zorder=2)
+            daily_levels = series['levels'][:, index]
+            level_ax.plot(days, daily_levels, color=level_color, lw=1.0, zorder=3)
+            for start in starts[1:]:
+                level_ax.axvline(days[start]-.5, ls='--', color=boundary_color, lw=.75, zorder=1)
+            level_ax.plot(days[ends], daily_levels[ends], 'o', color=level_color, ms=3, zorder=4)
+            for end in ends:
+                value = daily_levels[end]
+                end_day = dates[end]
+                value_label = '{:.2f}'.format(value)
+                if (end_day.month, end_day.day) != (12, 31):
+                    value_label += end_day.strftime(' (%b %d)')
+                near_top = value > level_min[index]+.85*(level_max[index]-level_min[index])
+                level_ax.annotate(value_label, (days[end], value),
+                    xytext=(-4, -6 if near_top else 6), textcoords='offset points',
+                    ha='right', va='top' if near_top else 'bottom', fontsize=7, color=level_color,
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=.85, pad=1), zorder=5)
+
+            level_ax.set_ylim(level_min[index]-level_pad[index], level_max[index]+level_pad[index])
+            release_ax.set_ylim(max(0., release_min[index]-release_pad[index]),
+                                release_max[index]+release_pad[index])
+            level_ax.set_ylabel((reservoir+'\n' if column == 0 else '')+'Water level (m)')
+            release_ax.set_ylabel('Release (m³/s)')
+            for ax, color in ((level_ax, level_color), (release_ax, '#40795d')):
+                ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+                ax.tick_params(axis='y', labelsize=8, colors=color)
+                ax.yaxis.label.set_color(color)
+            level_ax.grid(axis='y', alpha=.16)
+
+        axes[0, column].set_title(label, fontsize=11, pad=8)
+        bottom = axes[-1, column]
+        month_ticks = [i for i, day in enumerate(dates)
+                       if day.day == 1 and day.month in (1, 4, 7, 10)]
+        bottom.set_xlim(.5, len(days)+.5)
+        bottom.set_xticks((days[starts]+days[ends])/2)
+        bottom.set_xticklabels(years[starts], fontsize=9)
+        bottom.set_xticks(days[month_ticks], minor=True)
+        bottom.set_xticklabels([dates[i].strftime('%b') for i in month_ticks], minor=True, fontsize=7)
+        bottom.tick_params(axis='x', which='major', length=0, pad=15)
+        bottom.tick_params(axis='x', which='minor', length=2, pad=2)
     return figure
+
+
+def overwrite_operation_figure(figure, path):
+    """Render completely before replacing the existing trajectory PNG."""
+    if path.suffix.lower() != '.png' or not path.is_file():
+        raise ValueError('No existing trajectory figure at '+str(path))
+    temporary = None
+    try:
+        with NamedTemporaryFile(dir=path.parent, suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            figure.savefig(stream, format='png', dpi=160)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input', required=True, type=Path)
+    parser.add_argument('--input', required=True, type=Path, nargs='+')
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--overwrite', action='store_true', help='Replace the existing trajectory PNG')
     args = parser.parse_args(argv)
     import matplotlib
     matplotlib.use('Agg', force=True)
     import matplotlib.pyplot as plt
     try:
-        series = load_daily_change_csv(args.input)
-        figure = make_operation_figure({'Seed '+str(series['seed']): series})
+        series = [load_daily_change_csv(path) for path in args.input]
+        by_label = {'Seed '+str(row['seed']): row for row in sorted(series, key=lambda row: row['seed'])}
+        if len(by_label) != len(series):
+            raise ValueError('Specify only one daily CSV per seed')
+        figure = make_operation_figure(by_label)
         try:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            with args.output.open('xb') as stream:
-                figure.savefig(stream, format='png', dpi=160)
+            if args.overwrite:
+                overwrite_operation_figure(figure, args.output)
+            else:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                with args.output.open('xb') as stream:
+                    figure.savefig(stream, format='png', dpi=160)
         finally:
             plt.close(figure)
     except (OSError, KeyError, ValueError) as exc:

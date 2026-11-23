@@ -1,4 +1,4 @@
-"""Render learning, performance, operation trajectories and water allocation."""
+"""Render learning, ecological-flow violation rates and operation trajectories."""
 import argparse
 from datetime import date
 import json
@@ -241,12 +241,10 @@ def validate_run(run):
             legacy.validate_periodic_row(row, signature)
             if 'gamma' in row and float(row['gamma']) != float(run['gamma']):
                 raise ValueError('Periodic gamma differs from plot gamma')
-    if not legacy.violation_metrics_available(run):
-        raise ValueError('Figures require actual periodic violation counts')
 
 
 def load_run(path):
-    run = legacy.load_episode_log(path)
+    run = legacy.load_episode_log(path, derived_trajectory=True)
     with Path(path).open(encoding='utf-8') as stream:
         for line in stream:
             if line.strip():
@@ -261,41 +259,44 @@ def load_run(path):
     return run
 
 
-FIGURE_CATEGORIES = ('learning', 'performance', 'trajectories', 'water_allocation')
-IDS = ('WDD', 'BHT', 'XLD', 'XJB', 'THR')
+FIGURE_CATEGORIES = ('learning', 'ecological_violation_rate', 'trajectories')
+MAX_VIOLATION_EVALUATION_ROUND = 50
 
 
 def _make_learning(run):
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
 
-    figure, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
     _, histories, grids = legacy.periodic_histories(run)
-    grid = np.unique(np.concatenate(grids))
+    recorded = np.unique(np.concatenate(grids))
+    interval = run['comparison_context']['shared_settings']['evaluation_interval']
+    grid = np.union1d(recorded, np.arange(0, recorded[-1]+1, interval))
     aligned = np.full((len(histories), len(grid)), np.nan)
     for index, (rounds, rows) in enumerate(zip(grids, histories)):
         aligned[index, np.searchsorted(grid, rounds)] = [
             legacy._finite_return(row['system_evaluator_return'], 'system_evaluator_return')
             if row['status'] == 'ok' else np.nan for row in rows]
-    configured = run['comparison_context']['shared_settings']['seeds']
-    valid = np.isfinite(aligned).all(axis=0) & (len(histories) == len(configured))
+    observed = np.isfinite(aligned)
     mean = np.full(len(grid), np.nan)
-    mean[valid] = aligned[:, valid].mean(axis=0)
-    color = COLOR
-    ax.plot(grid, mean, color=color, lw=2, marker='.',
-            label='MAPPO mean')
-    if len(histories) > 1:
-        sd = np.full(len(grid), np.nan)
-        sd[valid] = aligned[:, valid].std(axis=0, ddof=1)
-        ax.fill_between(grid, mean-sd, mean+sd, color=color, alpha=.18,
-                        label='MAPPO ±1 SD')
-    if (~valid).any():
-        ax.scatter(grid[~valid], np.full((~valid).sum(), .07),
-                   transform=ax.get_xaxis_transform(), color=color, marker='x',
-                   label='MAPPO incomplete round')
-    ax.set(xlabel='Evaluation round', ylabel='Discounted system return',
-           title='System return on three fixed training windows')
+    sd = np.full(len(grid), np.nan)
+    for column in np.flatnonzero(observed.any(axis=0)):
+        returns = aligned[observed[:, column], column]
+        mean[column] = returns.mean()
+        if len(returns) > 1:
+            sd[column] = returns.std(ddof=1)
+
+    figure, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    if observed.any():
+        ax.plot(grid, mean, color=COLOR, lw=2, marker='.', label='MAPPO mean')
+        if np.isfinite(sd).any():
+            ax.fill_between(grid, mean-sd, mean+sd, color=COLOR, alpha=.18, label='±1 SD')
+        ax.legend()
+    else:
+        ax.text(.5, .5, 'No completed evaluator returns', transform=ax.transAxes,
+                ha='center', va='center')
+    ax.set(xlabel='Evaluation round', ylabel='Evaluator return', title='Evaluator return')
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.grid(alpha=.2)
-    ax.legend()
     return figure
 
 
@@ -307,83 +308,98 @@ def _held_out(run):
     return sorted(rows, key=lambda row: row['seed'])
 
 
-def _make_performance(run):
+def _make_ecological_violation_rate(run):
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
 
-    metrics = (
-        ('hydropower_generation_TWh', 1., 'Hydropower generation (TWh)'),
-        ('ecological_violation_rate', 100., 'Ecological violation rate (%)'),
-        ('ecological_deficit_volume_m3', 1e-9, 'Cumulative ecological deficit (billion m³)'),
-    )
-    figure, axes = plt.subplots(1, 3, figsize=(13, 4), constrained_layout=True)
-    rows = _held_out(run)
-    for ax, (key, scale, label) in zip(axes, metrics):
-        seeds = [row['seed'] for row in rows if row[key] is not None]
-        values = [row[key]*scale for row in rows if row[key] is not None]
-        ax.scatter(seeds, values, color=COLOR, label='MAPPO')
-        ax.set(xlabel='Seed', ylabel=label)
-        ax.xaxis.get_major_locator().set_params(integer=True)
-        ax.grid(alpha=.2)
-    axes[0].legend()
-    days = run['episode_horizon_days']
-    figure.suptitle('Held-out operational performance · {} days'.format(days))
-    return figure
+    _, histories, _ = legacy.periodic_histories(run)
+    settings = run['comparison_context']['shared_settings']
+    rounds = np.arange(MAX_VIOLATION_EVALUATION_ROUND + 1)
+    # Keep missing scheduled rounds as gaps and include recorded off-schedule
+    # rounds, such as the final update when it falls between scheduled rounds.
+    in_grid = rounds % settings['evaluation_interval'] == 0
+    rates = np.full((len(histories), len(rounds)), np.nan)
+    for index, rows in enumerate(histories):
+        for row in rows:
+            step = row['evaluation_round']
+            if step > MAX_VIOLATION_EVALUATION_ROUND:
+                break
+            in_grid[step] = True
+            rate = row.get('ecological_flow_violation_rate')
+            if row['status'] == 'ok' and rate is not None:
+                rates[index, step] = 100. * float(rate)
 
-
-def _make_water_allocation(run):
-    import matplotlib.pyplot as plt
+    mean = np.full(len(rounds), np.nan)
+    sd = np.full(len(rounds), np.nan)
+    for step in np.flatnonzero(np.isfinite(rates).any(axis=0)):
+        values = rates[np.isfinite(rates[:, step]), step]
+        mean[step] = values.mean()
+        if len(values) > 1:
+            sd[step] = values.std(ddof=1)
 
     figure, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
-    positions = np.arange(len(IDS))
-    rows = _held_out(run)
-    change = np.asarray([row['storage_change_m3'] for row in rows], dtype=float)/1e9
-    if change.shape != (len(rows), len(IDS)) or not np.isfinite(change).all():
-        raise ValueError('Storage change must contain five finite reservoir values per seed')
-    ax.bar(positions, change.mean(axis=0), width=.32, color=COLOR, alpha=.7, label='MAPPO mean')
-    ax.scatter(np.broadcast_to(positions, change.shape), change,
-               color=COLOR, edgecolor='white', linewidth=.5, s=20, zorder=3)
-    ax.axhline(0, color='0.3', lw=.8)
-    ax.set(xticks=positions, xticklabels=IDS, ylabel='Final − initial storage (billion m³)',
-           title='Held-out water allocation by reservoir')
-    ax.grid(axis='y', alpha=.2)
-    ax.legend()
+    grid, mean, sd = rounds[in_grid], mean[in_grid], sd[in_grid]
+    if np.isfinite(mean).any():
+        label = 'MAPPO mean' if len(settings['seeds']) > 1 else 'MAPPO'
+        ax.plot(grid, mean, color=COLOR, lw=2, marker='.', label=label)
+        if np.isfinite(sd).any():
+            ax.fill_between(grid, mean-sd, mean+sd, color=COLOR, alpha=.18, label='±1 SD')
+        ax.legend()
+    else:
+        ax.text(.5, .5, 'No recorded evaluator rates', transform=ax.transAxes,
+                ha='center', va='center')
+    ax.set(xlabel='Evaluation round', ylabel='Ecological-flow violation rate (%)',
+           title='Ecological-flow violation rate', xlim=(0, MAX_VIOLATION_EVALUATION_ROUND))
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.grid(alpha=.2)
     return figure
 
 
 def _make_trajectories(run, seed):
     from examples.plot_daily_change_diagnostics import load_daily_change_csv, make_operation_figure
 
-    if seed is None:
-        seed = run['comparison_context']['shared_settings']['seeds'][0]
-    row = next((row for row in _held_out(run) if row['seed'] == seed), None)
-    if row is None:
+    rows = [row for row in _held_out(run) if seed is None or row['seed'] == seed]
+    if not rows:
         raise ValueError('No completed held-out MAPPO trajectory for seed '+str(seed))
-    trajectory = run.get('figure_trajectory')
-    if trajectory is not None:
-        dates = [date.fromisoformat(day) for day in trajectory['dates']]
-        series = dict(trajectory, dates=dates, years=[day.year for day in dates],
-                      levels=np.asarray(trajectory['levels_end']),
-                      releases=np.asarray(trajectory['release']))
-    else:
-        files = run.get('daily_change_diagnostics', {}).get('files', {}).get(str(seed), {})
-        if not files.get('csv'):
-            raise ValueError('Run does not record a held-out daily CSV for seed '+str(seed))
-        path = Path(files['csv'])
-        if not path.is_file() and run.get('log_directory'):
-            path = Path(run['log_directory'])/path.name
-        series = load_daily_change_csv(path)
-    dates = series['dates']
-    if (series['seed'] != seed or len(dates) != row['episode_horizon_days'] or
-            dates[0].isoformat() != row['start_date'] or dates[-1].isoformat() != row['end_date'] or
-            list(dict.fromkeys(series['years'])) != row['source_years']):
-        raise ValueError('Daily trajectory disagrees with the recorded held-out evaluation')
-    return make_operation_figure({'MAPPO seed '+str(seed): series})
+    trajectories = run.get('figure_trajectories', [])
+    if 'figure_trajectory' in run:  # Older in-memory plot payloads retained one seed.
+        trajectories = [*trajectories, run['figure_trajectory']]
+    in_memory = {trajectory['seed']: trajectory for trajectory in trajectories}
+    if len(in_memory) != len(trajectories) or len({row['seed'] for row in rows}) != len(rows):
+        raise ValueError('Held-out trajectories require distinct evaluated seeds')
+    files = run.get('daily_change_diagnostics', {}).get('files', {})
+    series_by_label, missing = {}, []
+    for row in rows:
+        seed_id = row['seed']
+        if seed_id in in_memory:
+            trajectory = in_memory[seed_id]
+            series = dict(trajectory, dates=[date.fromisoformat(day) for day in trajectory['dates']],
+                          levels=trajectory['levels_end'], releases=trajectory['release'])
+        else:
+            source = files.get(str(seed_id), {}).get('csv')
+            path = None if source is None else Path(source)
+            if path is not None and not path.is_file() and run.get('log_directory'):
+                path = Path(run['log_directory'])/path.name
+            if path is None or not path.is_file():
+                missing.append(seed_id)
+                continue
+            series = load_daily_change_csv(path)
+        dates = series['dates']
+        if (series['seed'] != seed_id or len(dates) != row['episode_horizon_days'] or not dates or
+                dates[0].isoformat() != row['start_date'] or dates[-1].isoformat() != row['end_date'] or
+                list(dict.fromkeys(day.year for day in dates)) != row['source_years']):
+            raise ValueError('Daily trajectory disagrees with the held-out evaluation for seed '+str(seed_id))
+        series_by_label['Seed '+str(seed_id)] = series
+    if not series_by_label:
+        raise ValueError('No held-out daily trajectory data for seeds '+', '.join(map(str, missing)))
+    if missing:
+        print('Held-out daily data unavailable for seeds '+', '.join(map(str, missing)), file=sys.stderr)
+    return make_operation_figure(series_by_label)
 
 
 def make_figures(run, categories=FIGURE_CATEGORIES, trajectory_seed=None):
     validate_run(run)
-    builders = dict(learning=_make_learning, performance=_make_performance,
-                    water_allocation=_make_water_allocation)
+    builders = dict(learning=_make_learning, ecological_violation_rate=_make_ecological_violation_rate)
     figures = {}
     try:
         for name in categories:
@@ -406,26 +422,34 @@ def main(argv=None):
     parser.add_argument('--categories', nargs='+', choices=FIGURE_CATEGORIES,
                         default=FIGURE_CATEGORIES)
     parser.add_argument('--trajectory-seed', type=int)
+    parser.add_argument('--overwrite-trajectory', action='store_true',
+                        help='Replace an existing PNG when rendering only trajectories')
     args = parser.parse_args(argv)
     import matplotlib
     matplotlib.use('Agg', force=True)
     import matplotlib.pyplot as plt
 
     categories = tuple(dict.fromkeys(args.categories))
+    if args.overwrite_trajectory and categories != ('trajectories',):
+        parser.error('--overwrite-trajectory requires --categories trajectories')
     paths = {name: (args.output_dir/(name+'.png') if args.output_dir is not None else
                     args.output_stem.with_name(args.output_stem.stem+'_'+name+'.png'))
              for name in categories}
     try:
         for path in paths.values():
-            if path.exists():
+            if path.exists() and not args.overwrite_trajectory:
                 raise ValueError('Output already exists: '+str(path))
         run = load_run(args.episode_log) if args.episode_log is not None else json.load(sys.stdin)
         figures = make_figures(run, categories, args.trajectory_seed)
         try:
             for name, path in paths.items():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open('xb') as stream:
-                    figures[name].savefig(stream, format='png', dpi=160)
+                if args.overwrite_trajectory:
+                    from examples.plot_daily_change_diagnostics import overwrite_operation_figure
+                    overwrite_operation_figure(figures[name], path)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with path.open('xb') as stream:
+                        figures[name].savefig(stream, format='png', dpi=160)
                 print(str(path.resolve()))
         finally:
             for figure in figures.values():

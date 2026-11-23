@@ -194,9 +194,11 @@ Training windows contain training years only. Coverage-balanced sampling reduces
 unequal year-day exposure; `--window-sampling uniform` restores uniform draws.
 Storage carries across source-year boundaries within each episode.
 
-Periodic evaluation runs on three fixed training-only scenarios before update
-one, every configured interval and after the final update. It uses deterministic
-policies and fresh environments without updating models, optimizers or RNG state.
+Periodic evaluation runs at round zero and after every policy update. All seeds
+use the same 1,825-day median-inflow sequence selected from the training years.
+Each evaluation starts in a fresh environment with the same initial storage and
+executes the current policy deterministically. Model parameters, optimizers, and
+training RNG state are preserved.
 Final held-out evaluation uses an ordered representative-year sequence and the
 same episode horizon. Physical infeasibility is reported explicitly; failed
 windows remain failures, with no completed aggregate substituted from survivors.
@@ -209,10 +211,11 @@ These fields describe policy performance; they are never substituted into actor
 rewards or GAE targets. Completed evaluations also carry the initial, final and
 change storage trajectory.
 
-## Generate the four figure categories
+## Generate the figures
 
-Use `--figures-only` with a fresh output stem to train MAPPO and save the PNGs.
-The trajectory figure shows the first configured seed.
+Use `--figures-only` with a fresh output stem to save the PNGs and one
+`ecological_violations.csv` beside them. The trajectory figure shows the first
+configured seed. The CSV combines all seeds' held-out violations.
 
 ```bash
 run_dir="runs/mappo_$(date +%Y%m%d_%H%M%S)"
@@ -236,21 +239,29 @@ conda run --no-capture-output -n base python -B examples/plot_cascade.py \
 
 | File | Contents |
 | --- | --- |
-| `learning.png` | Discounted system return by evaluation round, averaged over the three fixed training windows and shown as mean ± sample SD across seeds. Incomplete rounds leave gaps. |
-| `performance.png` | Held-out hydropower generation, ecological violation rate, and cumulative ecological flow deficit for each seed. |
-| `trajectories.png` | End-of-day water level, effective permitted bounds, and executed total release for each reservoir, in episode order for the selected seed. |
-| `water_allocation.png` | Signed final-minus-initial storage by reservoir, with seed points and the MAPPO mean. |
+| `learning.png` | Evaluator system return by round. The line uses the mean over available seeds, with a sample SD band where at least two seeds have results. |
+| `ecological_violation_rate.png` | Recorded periodic evaluator ecological-flow violation rates by round. |
+| `trajectories.png` | End-of-day water level, effective permitted bounds, and executed total release for each reservoir. Vertical lines mark source-year joins, and release panels shade June–September. |
 
-Use `--categories learning`, `--categories performance`,
-`--categories trajectories`, or `--categories water_allocation` for individual
+Use `--categories learning`, `--categories ecological_violation_rate`, or
+`--categories trajectories` for individual
 figures. `--trajectory-seed` defaults to the first configured seed. The
 trajectory category uses the saved daily CSVs. System return is a performance
 metric. Training uses the per-reservoir mixed rewards.
 
+## Held-out ecological-flow violations
+
+Each CSV row records one reward-defined ecological-flow violation. A violation
+is unavoidable when the dispatcher's maximum effective release falls short
+beyond the reward tolerance. Otherwise it is avoidable given the same day's
+conditions. A forced interval has one attainable release. The console shows
+counts, rates per active requirement day, and deficit volumes by reservoir and
+classification for each seed.
+
 ## Daily-change diagnostics
 
-Held-out evaluation writes per-seed daily changes, level-change statistics, and
-ramp-conflict CSVs when a run output path is configured. The daily CSV keeps the
+With a run output path and without `--figures-only`, held-out evaluation also
+writes per-seed daily changes, level-change statistics, and ramp-conflict CSVs. The daily CSV keeps the
 original level, release and change columns and adds both effective permitted
 level bounds. The first daily difference is empty. Subsequent differences
 continue through the source-year joins.

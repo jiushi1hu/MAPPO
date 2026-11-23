@@ -12,6 +12,12 @@ INTEGRAL_FIELDS = dict(ecological_flow='deficit_volume_m3')
 REWARD_AGGREGATION = 'sum(gamma**t * daily_reward), t=0 at episode start'
 
 
+def ecological_flow_shortfall(threshold, release):
+    """Return flow deficits after filtering the reward's numerical roundoff."""
+    raw = np.maximum(threshold-release, 0.)
+    return np.where(raw > 1e-10*np.maximum(threshold, 1.), raw, 0.)
+
+
 def reward_metadata(data):
     requirements = getattr(data, 'service_requirements', None)
     return dict(reward_definition=REWARD_DEFINITION,
@@ -105,9 +111,7 @@ class OperationReward:
         active = {k: threshold > 0. for k, threshold in self.thresholds.items()}
         excess, normalized, by_reservoir = {}, {}, {}
         for k, threshold in self.thresholds.items():
-            raw = np.maximum(threshold-actual[k], 0.)
-            # Ignore only relative floating-point roundoff, in costs and counts.
-            excess[k] = np.where(raw > 1e-10*np.maximum(threshold, 1.), raw, 0.)
+            excess[k] = ecological_flow_shortfall(threshold, actual[k])
             normalized[k] = np.divide(excess[k], threshold, out=np.zeros(len(IDS)), where=active[k])
             weight = self.settings[k+'_weight'] if self.settings['enabled'] else 0.
             by_reservoir[k] = weight*normalized[k]/max(int(active[k].sum()), 1)

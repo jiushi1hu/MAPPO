@@ -244,7 +244,6 @@ def main(argv=None):
                     '--parallel-envs', str(args.parallel_envs),
                     '--seeds', *map(str, args.seeds),
                     '--feasibility-mode', mode,
-                    '--eval-interval', '5',
                     '--log-interval', '5',
                     '--no-plot',
                     '--episode-log', str(logs[mode]),

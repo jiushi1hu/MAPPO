@@ -52,5 +52,4 @@ experiment:
   window_sampling: coverage_balanced  # Approximate equal year-day exposure; uniform restores legacy draws.
   episodes: 300  # Completed five-year episodes per seed; divisible by six workers (50 updates).
   log_interval: 1  # Console reporting cadence in policy updates.
-  eval_interval: 1  # Fixed training-window evaluation at round 0, every N updates, and the final update.
   seeds: [1, 2, 3, 4, 5]

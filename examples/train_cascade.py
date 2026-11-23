@@ -38,8 +38,8 @@ def main(argv=None):
     parser.add_argument('--window-sampling',choices=SAMPLING_MODES,
                         help='Training-window schedule: coverage_balanced (default) or legacy uniform sampling')
     parser.add_argument('--log-interval',type=int,help='Print training progress every N updates')
-    parser.add_argument('--eval-interval',type=int,
-                        help='Evaluate fixed training scenarios every N updates (default: 1); also at round 0 and the last update')
+    parser.add_argument('--eval-interval',type=int,choices=(1,),
+                        help='The evaluator runs at round 0 and after every update (interval 1)')
     parser.add_argument('--evaluation-years',nargs='+',type=int,metavar='YEAR',
                         help='Exactly five held-out years; the other 55 years are used for training')
     parser.add_argument('--seeds',nargs='+',type=int)
@@ -81,7 +81,7 @@ def main(argv=None):
     parser.add_argument('--plot-output',type=Path,
                         help='Stem for the retained PNGs and directory for daily CSVs')
     parser.add_argument('--figures-only',action='store_true',
-                        help='Save only PNGs using in-memory results; requires --plot-output')
+                        help='Save PNGs and one held-out ecological-violations CSV using in-memory results; requires --plot-output')
     parser.add_argument('--no-plot',action='store_true',
                         help='Skip all PNGs; retain daily CSVs with --episode-log')
     args = parser.parse_args(argv)
@@ -97,7 +97,7 @@ def main(argv=None):
         parser.error('--checkpoint-interval requires --save-checkpoints')
     config, physical = load_configuration()
     exp, train, model, algo = (config[key] for key in ('experiment','train','model','algo'))
-    for name in ('episodes','log_interval','seeds','eval_interval','window_sampling'):
+    for name in ('episodes','log_interval','seeds','window_sampling'):
         value = getattr(args,name)
         if value is not None:
             exp[name] = value
@@ -130,7 +130,6 @@ def main(argv=None):
         train['n_rollout_threads'] = positive_integer(train['n_rollout_threads'],'parallel_envs')
         exp['episodes'] = positive_integer(exp['episodes'],'episodes')
         exp['log_interval'] = positive_integer(exp['log_interval'],'log_interval')
-        exp['eval_interval'] = positive_integer(exp.get('eval_interval',1),'eval_interval')
         exp['window_sampling'] = validate_sampling_mode(exp.get('window_sampling','coverage_balanced'))
         if exp['episodes'] % train['n_rollout_threads']:
             raise ValueError('episodes must be divisible by parallel_envs')

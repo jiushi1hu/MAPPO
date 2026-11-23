@@ -96,13 +96,13 @@ def learning_return_value(payload, row, phase):
 
 
 def validate_learning_evaluation(payload, row):
-    """Check the selected round return against all three complete windows."""
+    """Check the selected round return against the recorded evaluator inputs."""
     if learning_return_kind(payload) == 'legacy_team':
         return
     value = learning_return_value(payload, row, 'evaluation')
     windows = [learning_return_value(payload, window, 'evaluation') for window in row['windows']]
     if row['status'] == 'ok' and not np.isclose(value, np.mean(windows), rtol=1e-10, atol=1e-10):
-        raise ValueError('Learning evaluator return must equal the mean of all three fixed windows')
+        raise ValueError('Learning evaluator return disagrees with the recorded windows')
 
 
 def positive_integer(value, name):
@@ -119,13 +119,14 @@ def evaluation_round(value):
 
 def window_signature(windows):
     """Identify the fixed scenarios, including initial conditions and forcing."""
-    if not isinstance(windows, list) or len(windows) != 3:
-        raise ValueError('Periodic evaluation must use exactly three fixed windows')
+    # Older logs contain three windows. A run must keep the same descriptor(s).
+    if not isinstance(windows, list) or len(windows) not in (1, 3):
+        raise ValueError('Expected one fixed evaluation sequence or three historical windows')
     fields = ('window_id', 'window_start_year', 'source_years', 'episode_horizon_days',
               'start_date', 'end_date', 'initial_storage_m3', 'initial_level_m',
               'external_inflow_sha256')
     identities = [{key:row[key] for key in fields} for row in windows]
-    if len({row['window_id'] for row in identities}) != 3:
+    if len({row['window_id'] for row in identities}) != len(windows):
         raise ValueError('Periodic window identifiers must be unique')
     for row in identities:
         positive_integer(row['episode_horizon_days'], 'periodic episode_horizon_days')
@@ -144,31 +145,35 @@ def validate_periodic_row(row, expected_signature=None):
     signature = window_signature(row['windows'])
     if expected_signature is not None and signature != expected_signature:
         raise ValueError('Periodic evaluation scenarios or initial conditions changed')
-    if row.get('window_count') != 3:
-        raise ValueError('Periodic window_count must equal three')
+    window_count = len(row['windows'])
+    if row.get('window_count') != window_count:
+        raise ValueError('Periodic window_count disagrees with the recorded windows')
     statuses = [window.get('status') for window in row['windows']]
     if any(status not in ('ok', 'failed') for status in statuses):
         raise ValueError('Unknown periodic window status')
     successful = statuses.count('ok')
     if row.get('successful_window_count') != successful:
         raise ValueError('Periodic successful_window_count disagrees with the window results')
-    values = []
-    for window in row['windows']:
-        value = window.get('evaluator_return')
-        if window['status'] == 'ok':
-            if value is None or isinstance(value, bool) or not np.isfinite(float(value)):
-                raise ValueError('Successful periodic windows require finite evaluator returns')
-            values.append(float(value))
+    completed = successful == window_count
+    if row.get('status') != ('ok' if completed else 'failed'):
+        raise ValueError('Periodic evaluation status disagrees with the window results')
+    fields = ['evaluator_return']
+    if any('system_evaluator_return' in scope for scope in [row]+row['windows']):
+        fields.append('system_evaluator_return')
+    for field in fields:
+        values = []
+        for window in row['windows']:
+            value = window.get(field)
+            if window['status'] == 'ok':
+                values.append(_finite_return(value, field))
+            elif value is not None:
+                raise ValueError('Failed periodic windows must not report a completed return')
+        value = row.get(field)
+        if completed:
+            if not np.isclose(_finite_return(value, field), np.mean(values), rtol=1e-10, atol=1e-10):
+                raise ValueError('Evaluator return disagrees with the recorded windows')
         elif value is not None:
-            raise ValueError('Failed periodic windows must not report a completed return')
-    value = row.get('evaluator_return')
-    if successful == 3:
-        if row.get('status') != 'ok' or value is None or isinstance(value, bool):
-            raise ValueError('A successful periodic evaluation requires a completed mean return')
-        if not np.isfinite(float(value)) or not np.isclose(float(value), np.mean(values), rtol=1e-10, atol=1e-10):
-            raise ValueError('Evaluator return must equal the mean of all three fixed windows')
-    elif row.get('status') != 'failed' or value is not None:
-        raise ValueError('A failed periodic evaluation must leave the aggregate return null')
+            raise ValueError('A failed periodic evaluation must leave the aggregate return null')
     validate_violation_metrics(row)
     return signature
 
@@ -215,20 +220,11 @@ def validate_violation_metrics(row):
             for suffix in ('violation_count', 'active_reservoir_days'):
                 field = term+'_'+suffix
                 if row[field] != sum(window[field] for window in row['windows']):
-                    raise ValueError('Aggregate violation counts must sum all three fixed windows')
+                    raise ValueError('Aggregate violation counts must sum the recorded windows')
     return True
 
 
-def violation_metrics_available(payload):
-    """Do not turn absent legacy frequencies into zero-valued curves."""
-    _, histories = available_histories(payload, 'evaluation_histories')
-    available = [validate_violation_metrics(row) for rows in histories for row in rows]
-    if any(available) and not all(available):
-        raise ValueError('Some evaluation rounds lack violation counts; mixed legacy/new histories cannot provide a complete violation-rate curve')
-    return bool(available) and all(available)
-
-
-def load_episode_log(path):
+def load_episode_log(path, *, derived_trajectory=False):
     """Stream summary records, retaining collector and evaluator histories separately."""
     configuration, histories, updates = None, {}, {}
     evaluations, last_rounds, scenarios = {}, {}, None
@@ -236,6 +232,7 @@ def load_episode_log(path):
     final_evaluations, daily_change_diagnostics = {}, {}
     pending_episodes = {}
     pending_lanes = {}
+    trajectory_png = None
     # Step writers put record_type first. Other key orders still use the JSON
     # parser below, so existing logs do not depend on object-key order.
     step_prefix = re.compile(r'^\s*\{\s*"record_type"\s*:\s*"(?:training_step|evaluation_step)"\s*[,}]')
@@ -293,6 +290,8 @@ def load_episode_log(path):
                     periodic = row.get('periodic_evaluation', {})
                     if 'windows' in periodic:
                         scenarios = window_signature(periodic['windows'])
+                    if derived_trajectory:
+                        trajectory_png = row.get('figure_paths', {}).get('trajectories')
                     configuration['training_years'] = row.get('training_years')
                     configuration['evaluation_source_years'] = row.get('evaluation_source_years', [])
                     for name in ('algorithm', 'algorithm_name', 'learning_objective',
@@ -406,7 +405,14 @@ def load_episode_log(path):
     manifest_path = next((candidate for candidate in manifest_candidates
                           if candidate.is_file()), None)
     if verify_artifact_manifest is not None and manifest_path is not None:
-        manifest = verify_artifact_manifest(manifest_path)
+        replotted_trajectory = None
+        if isinstance(trajectory_png, str) and Path(trajectory_png).suffix.lower() == '.png':
+            # The trajectory PNG is a replaceable rendering. The source log and
+            # daily CSVs remain part of the manifest's input checks.
+            replotted_trajectory = Path(trajectory_png).resolve()
+            if not replotted_trajectory.is_file():
+                replotted_trajectory = (manifest_path.parent/replotted_trajectory.name).resolve()
+        manifest = verify_artifact_manifest(manifest_path, replotted_trajectory=replotted_trajectory)
         if configuration.get('run_id') != manifest.get('run_id'):
             raise ValueError('Episode log and artifact manifest belong to different runs')
         def binds_log(row):

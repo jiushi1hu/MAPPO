@@ -10,7 +10,7 @@ import sys
 
 from harl.envs.cascade_reservoir.episodes import episode_environment, positive_integer, training_windows
 from harl.envs.cascade_reservoir.periodic_evaluation import (
-    PERIODIC_EVALUATION_DAYS, select_periodic_windows)
+    PERIODIC_EVALUATION_DAYS, select_periodic_window)
 from harl.envs.cascade_reservoir.training_metrics import log_episode, StepMetricsWriter, STEP_METRIC_FIELDS
 from harl.envs.cascade_reservoir.training_sampler import TrainingWindowSampler, validate_sampling_mode
 from harl.envs.cascade_reservoir.reservoir_physics import InfeasibleCascade
@@ -19,6 +19,8 @@ from harl.envs.cascade_reservoir.trajectory_diagnostics import (
 from harl.envs.cascade_reservoir.daily_change_diagnostics import (
     DAILY_CHANGE_FIELDS, LEVEL_BOUND_FIELDS, STATISTICS_FIELDS, daily_change_output_paths,
     flatten_output_paths, write_daily_change_csv, write_level_change_statistics_csv)
+from harl.envs.cascade_reservoir.ecological_violations import (
+    EcologicalViolationRecorder, write_ecological_violations)
 from harl.envs.cascade_reservoir.level_ramp import (
     RampConflictWriter, ensure_ramp_conflict_csv)
 from harl.runners.cascade_mappo_runner import (
@@ -111,7 +113,7 @@ def write_artifact_manifest(path, provenance, paths, root=None):
     return manifest
 
 
-def verify_artifact_manifest(path):
+def verify_artifact_manifest(path, *, replotted_trajectory=None):
     """Reject altered, missing or foreign-run artifacts; return the manifest."""
     path = Path(path)
     try:
@@ -136,6 +138,8 @@ def verify_artifact_manifest(path):
         seen.add(relative)
         artifact = Path(relative)
         artifact = artifact if artifact.is_absolute() else path.parent/artifact
+        if replotted_trajectory is not None and artifact.resolve() == replotted_trajectory:
+            continue
         if not artifact.is_file():
             raise ValueError('Artifact is missing: '+str(artifact))
         if entry.get('bytes') != artifact.stat().st_size:
@@ -171,7 +175,7 @@ def plot_output_paths(episode_log=None, plot_output=None, *, held_out=True):
     if stem is None:
         return {}
     path = Path(stem)
-    categories = FIGURE_CATEGORIES if held_out else ('learning',)
+    categories = FIGURE_CATEGORIES if held_out else ('learning', 'ecological_violation_rate')
     return {name: path.with_name(path.stem+'_'+name+'.png') for name in categories}
 
 
@@ -184,7 +188,7 @@ def render_figures(payload, stem, categories, plot_python, verbose_console):
 
 
 def daily_change_output_directory(plot_output=None, episode_log=None):
-    """Place automatic daily diagnostics beside the requested run figures."""
+    """Place held-out CSVs beside the requested figures or episode log."""
     source = plot_output if plot_output is not None else episode_log
     return None if source is None else Path(source).parent
 
@@ -246,7 +250,6 @@ def run_parallel_experiment(data, physical, config, args):
     count=positive_integer(config['train']['n_rollout_threads'],'parallel_envs')
     episodes=positive_integer(config['experiment']['episodes'],'episodes')
     interval=positive_integer(config['experiment']['log_interval'],'log_interval')
-    eval_interval=positive_integer(config['experiment'].get('eval_interval',1),'eval_interval')
     if episodes % count:
         raise ValueError('episodes must be divisible by parallel_envs')
     windows=training_windows(data,days)
@@ -275,11 +278,14 @@ def run_parallel_experiment(data, physical, config, args):
         args.plot_output, args.episode_log, config['experiment']['seeds']))
     daily_change_directory=(None if not daily_change_paths_by_seed else
         next(iter(daily_change_paths_by_seed.values()))['csv'].parent)
-    periodic_windows=select_periodic_windows(data)
+    results_directory = daily_change_output_directory(args.plot_output, args.episode_log)
+    violation_path = (None if args.skip_final_evaluation or results_directory is None else
+                      results_directory/'ecological_violations.csv')
+    periodic_window = select_periodic_window(data)
     output_paths=(([] if args.episode_log is None else [args.episode_log])+
                   list(daily_paths.values())+flatten_output_paths(daily_change_paths_by_seed)+
                   list(figure_paths.values())+list(trajectory_paths.values())+
-                  list(checkpoint_dirs.values()))
+                  list(checkpoint_dirs.values())+([] if violation_path is None else [violation_path]))
     if len({path.resolve() for path in output_paths}) != len(output_paths):
         raise ValueError('Experiment output paths must be distinct')
     for path in output_paths:
@@ -290,8 +296,7 @@ def run_parallel_experiment(data, physical, config, args):
           ' and the evaluation sequence' if not args.skip_final_evaluation else ''),flush=True)
     for years in list(windows.values())+([] if args.skip_final_evaluation else [evaluation_years]):
         check_episode_inputs(data,physical,years,days,bins)
-    for window in periodic_windows:
-        check_episode_inputs(data,physical,window['source_years'],PERIODIC_EVALUATION_DAYS,bins)
+    check_episode_inputs(data,physical,periodic_window['source_years'],PERIODIC_EVALUATION_DAYS,bins)
     sources=sorted(list((ROOT/'harl').rglob('*.py'))+list((ROOT/'examples').glob('*.py'))+
                    list((ROOT/'harl/configs').rglob('*.yaml')))
     if (not isinstance(data.hashes,dict) or not data.hashes or
@@ -318,9 +323,9 @@ def run_parallel_experiment(data, physical, config, args):
         episode_horizon_days=days,parallel_environments=count,episodes_per_seed=episodes,
         gamma=config['algo']['gamma'],action_bins=bins,seeds=config['experiment']['seeds'],
         actor_temporal_weighting='uniform_rollout_rows',
-        evaluation_interval=eval_interval,
+        evaluation_interval=1,
         training_years=list(data.training_years),evaluation_source_years=evaluation_years,
-        window_sampling=sampling_mode,physical_config=physical,periodic_windows=periodic_windows,
+        window_sampling=sampling_mode,physical_config=physical,periodic_windows=[periodic_window],
         device=config['device'],train=config['train'],model=config['model'],algo=config['algo']),
         data_hashes=data.hashes),sort_keys=True,allow_nan=False))
     metadata=dict(record_type='run_configuration',collection_mode='five_year_parallel',
@@ -353,13 +358,12 @@ def run_parallel_experiment(data, physical, config, args):
         training_window_sampling=dict(mode=sampling_mode,
             coverage_scope='completed training episodes only; evaluation and partial failed batches excluded',
             seed_plans=[sampler.metadata() for sampler in training_samplers.values()]),
-        periodic_evaluation=dict(eval_interval=eval_interval,
-            episode_horizon_days=PERIODIC_EVALUATION_DAYS,windows=periodic_windows,
-            schedule='round 0, every eval_interval completed updates, and the final update',
-            action_selection='deterministic argmax; fresh environments; no training samples',
-            aggregation='arithmetic mean of all three complete windows; null metrics if any window fails',
-            violation_rate_definition='violating active reservoir-days / all active reservoir-days; '
-                'counts pooled over all three complete windows; undiscounted; null if a window fails or no requirement is active',
+        periodic_evaluation=dict(eval_interval=1,
+            episode_horizon_days=PERIODIC_EVALUATION_DAYS,windows=[periodic_window],
+            schedule='round 0 and after every completed training update',
+            action_selection='deterministic argmax in a freshly initialized environment',
+            aggregation='one fixed median-inflow sequence shared by all seeds and rounds',
+            violation_rate_definition='violating active reservoir-days / all active reservoir-days in the completed sequence',
             violation_rate_units='fraction (plots display percent)',
             role='fixed training-only convergence diagnostics; held-out years are reserved for final evaluation'),
         figure_paths={name:str(path.resolve()) for name,path in figure_paths.items()},
@@ -463,7 +467,7 @@ def run_parallel_experiment(data, physical, config, args):
         runners=[]
         for seed in config['experiment']['seeds']:
             runner=CascadeMAPPORunner(data,physical,config,seed,episode_log=stream,
-                                          step_log=daily_writers.get(seed),periodic_windows=periodic_windows,
+                                          step_log=daily_writers.get(seed),periodic_window=periodic_window,
                                           training_sampler=training_samplers[seed],
                                           trajectory_log=trajectory_writers.get(seed),
                                           checkpoint_dir=checkpoint_dirs.get(seed),
@@ -479,15 +483,24 @@ def run_parallel_experiment(data, physical, config, args):
                     record['learning_rewards']['run_id'] = metadata['run_id']
         evaluations=[]
         daily_change_files={}
+        violation_recorders = []
         if not args.skip_final_evaluation:
             try:
                 for runner in runners:
-                    evaluations.extend(runner.final_evaluation())
+                    recorder = EcologicalViolationRecorder(runner.seed, data.service_requirements)
+                    rows = runner.final_evaluation(transition_observer=recorder.capture)
+                    evaluations.extend(rows)
+                    shortfalls = rows[0]['service_shortfalls']['ecological_flow']
+                    recorder.print_summary(shortfalls['by_reservoir_active_days'])
+                    violation_recorders.append(recorder)
             except InfeasibleCascade as exc:
                 if artifact_manifest_path is not None:
                     write_artifact_manifest(artifact_manifest_path, metadata['provenance'],
                         [path for path in [args.episode_log] if path is not None and path.exists()])
                 raise
+        if violation_path is not None:
+            write_ecological_violations(violation_path, violation_recorders)
+            print('Ecological-flow violations saved to '+str(violation_path.resolve()), flush=True)
         if daily_change_paths_by_seed:
             daily_change_files=save_daily_change_outputs(
                 runners, daily_change_paths_by_seed)
@@ -522,7 +535,7 @@ def run_parallel_experiment(data, physical, config, args):
         log_episode(result,stream,console=verbose_console)
         payload=json.loads(json.dumps(dict(episode_horizon_days=days,gamma=config['algo']['gamma'],
             seeds=config['experiment']['seeds'],updates_per_seed=episodes//count,
-            periodic_evaluation=dict(windows=periodic_windows),
+            periodic_evaluation=dict(windows=[periodic_window]),
             histories=[runner.training_history for runner in runners],
             evaluation_histories=[runner.periodic_evaluation_history for runner in runners],
             final_evaluations=evaluations,
@@ -531,11 +544,11 @@ def run_parallel_experiment(data, physical, config, args):
             run_id=metadata['run_id'],provenance=metadata['provenance'],
             daily_change_diagnostics=dict(enabled=bool(daily_change_files),
                 files=daily_change_files)),allow_nan=False))
-        if figures_only and not args.skip_final_evaluation:
-            # The automatic trajectory figure uses the first configured seed.
-            series = runners[0].final_evaluation_daily_series
-            payload['figure_trajectory'] = {name: series[name] for name in (
-                'seed', 'dates', 'levels_end', 'release', *LEVEL_BOUND_FIELDS)}
+        if figures_only and 'trajectories' in figure_paths:
+            daily_series = [runner.final_evaluation_daily_series for runner in runners]
+            payload['figure_trajectories'] = [
+                {name: series[name] for name in ('seed', 'dates', 'levels_end', 'release', *LEVEL_BOUND_FIELDS)}
+                for series in daily_series if series is not None]
         if figure_paths:
             render_figures(payload,
                 args.plot_output if args.plot_output is not None else args.episode_log,
@@ -543,7 +556,8 @@ def run_parallel_experiment(data, physical, config, args):
         if artifact_manifest_path is not None:
             generated=([args.episode_log] if args.episode_log is not None else []) + \
                 list(daily_paths.values())+flatten_output_paths(daily_change_paths_by_seed) + \
-                list(figure_paths.values())+list(trajectory_paths.values())+list(checkpoint_dirs.values())
+                list(figure_paths.values())+list(trajectory_paths.values())+list(checkpoint_dirs.values()) + \
+                ([] if violation_path is None else [violation_path])
             write_artifact_manifest(artifact_manifest_path,metadata['provenance'],generated)
             if args.episode_log is not None:
                 verify_artifact_manifest(artifact_manifest_path)

@@ -15,7 +15,7 @@ from harl.envs.cascade_reservoir.episodes import episode_environment, positive_i
 from harl.envs.cascade_reservoir.parallel_env import ParallelCascadeEnvs
 from harl.envs.cascade_reservoir.evaluation import evaluate_policy, episode_constraint_status
 from harl.envs.cascade_reservoir.periodic_evaluation import (
-    evaluate_periodic_policy, select_periodic_windows)
+    evaluate_periodic_policy, select_periodic_window)
 from harl.envs.cascade_reservoir.reservoir_physics import InfeasibleCascade
 from harl.envs.cascade_reservoir.level_ramp import conflicts_from_exception
 from harl.envs.cascade_reservoir.reward import (
@@ -63,7 +63,7 @@ class CascadeMAPPORunner(OnPolicyMARunner):
     actor_value_channels = (0, 1, 2, 3, 4)
 
     def __init__(self, data, physical_config, algo_args, seed, episode_log=None, step_log=None,
-                 periodic_windows=None, training_sampler=None,
+                 periodic_window=None, training_sampler=None,
                  trajectory_log=None, checkpoint_dir=None, ramp_conflict_log=None):
         seed = validate_seed(seed)
         self.data, self.physical_config = data, physical_config
@@ -87,9 +87,8 @@ class CascadeMAPPORunner(OnPolicyMARunner):
             if self.length*self.n_envs % count:
                 raise ValueError(key+' must divide all collected daily transitions')
         self.windows = training_windows(data, self.length)
-        self.eval_interval = positive_integer(args['experiment'].get('eval_interval', 1), 'eval_interval')
-        self.periodic_windows = copy.deepcopy(
-            select_periodic_windows(data) if periodic_windows is None else periodic_windows)
+        self.periodic_window = (select_periodic_window(data) if periodic_window is None else
+                                copy.deepcopy(periodic_window))
         self.training_window_starts = tuple(self.windows)
         self.sampled_window_starts = []
         self.seed, self.num_agents = seed, 5
@@ -436,8 +435,7 @@ class CascadeMAPPORunner(OnPolicyMARunner):
                         self.seed,k,updates,self.completed_episodes,episodes,self.training_steps,
                         self._progress_number(self._progress_return()),
                         self.last_rollout['episode_energy_TWh'],time.monotonic()-self.started),flush=True)
-                if k % self.eval_interval == 0 or k == updates:
-                    self.periodic_evaluation()
+                self.periodic_evaluation()
                 if self.checkpoint_dir is not None and (k == updates or
                         (self.checkpoint_interval and k % self.checkpoint_interval == 0)):
                     from harl.envs.cascade_reservoir.checkpoint import save_checkpoint
@@ -454,13 +452,13 @@ class CascadeMAPPORunner(OnPolicyMARunner):
 
     @torch.no_grad()
     def periodic_evaluation(self):
-        """Measure this policy on fresh, fixed training scenarios without collection."""
+        """Measure this policy on the fixed evaluation sequence without collection."""
         if (self.periodic_evaluation_history and
                 self.periodic_evaluation_history[-1]['evaluation_round'] == self.update_count):
             raise RuntimeError('This policy update has already been evaluated')
         record = evaluate_periodic_policy(self.actor, self.data, self.physical_config,
             seed=self.seed, evaluation_round=self.update_count, training_steps=self.training_steps,
-            windows=self.periodic_windows, gamma=self.algo_args['algo']['gamma'])
+            window=self.periodic_window, gamma=self.algo_args['algo']['gamma'])
         for window in record.get('windows', []):
             if window.get('status') == 'failed':
                 self._log_ramp_conflicts(
@@ -477,8 +475,7 @@ class CascadeMAPPORunner(OnPolicyMARunner):
             print('seed={} phase=evaluation update={}/{} windows={}/{} return={} ecological_violation={}'.format(
                 self.seed, self.update_count, total,
                 record.get('completed_window_count', record.get('successful_window_count', 0)),
-                record.get('window_count', len(self.periodic_windows)),
-                self._progress_number(self._progress_return(record)),
+                record['window_count'], self._progress_number(record['system_evaluator_return']),
                 'unavailable' if ecology is None else '{:.2f}%'.format(100.*ecology)), flush=True)
         return record
 
@@ -490,20 +487,26 @@ class CascadeMAPPORunner(OnPolicyMARunner):
                     value_normalization_update=value_normalization_update_schedule(
                         self.value_normalizer is not None))
 
-    def final_evaluation(self):
+    def final_evaluation(self, *, transition_observer=None):
         metadata = self.evaluation_policy_metadata()
         years = list(self.data.evaluation_years)
         modes = [actor.actor.training for actor in self.actor]
         from harl.envs.cascade_reservoir.daily_change_diagnostics import DailyChangeRecorder
         daily_recorder = DailyChangeRecorder(self.seed)
         self.final_evaluation_daily_series = None
+
+        def capture(transition):
+            daily_recorder.capture(transition)
+            if transition_observer is not None:
+                transition_observer(transition)
+
         print('seed={} phase=held-out-evaluation status=running'.format(self.seed), flush=True)
         try:
             with torch.random.fork_rng(devices=[]):
                 row = evaluate_policy(self.actor,self.data,self.physical_config,seed=self.seed,
                     episode=self.completed_episodes,training_steps=self.training_steps,diagnostics=True,
                     gamma=self.algo_args['algo']['gamma'],source_years=years,episode_days=self.length,
-                    step_log=self.step_log,transition_observer=daily_recorder.capture)
+                    step_log=self.step_log,transition_observer=capture)
         except InfeasibleCascade as exc:
             progress = getattr(exc, 'evaluation_progress', {})
             ramp_conflicts = conflicts_from_exception(exc)
