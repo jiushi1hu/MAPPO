@@ -65,7 +65,7 @@ class SharedMAPPOAgent:
         return getattr(core, name)
 
     def _observations(self, obs):
-        """Reject identity-augmented inputs so the 22-feature contract holds.
+        """Require raw local observations at the shared policy boundary.
 
         Only historical identity-conditioned checkpoints set identity_features.
         Current training uses the raw local vector.

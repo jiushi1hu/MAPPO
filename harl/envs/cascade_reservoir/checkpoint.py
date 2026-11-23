@@ -29,7 +29,7 @@ from harl.models.value_function_models.v_net import VNet
 
 ROOT = Path(__file__).resolve().parents[3]
 CHECKPOINT_FORMAT = 'cascade_reservoir_inference'
-CHECKPOINT_VERSION = 2
+CHECKPOINT_VERSION = 3
 REPLAY_TRACE_FIELDS = (
     'phase', 'seed', 'policy_update', 'episode_step', 'date', 'reservoir',
     'policy_action_index', 'command_action_index', 'effective_action_index',
@@ -249,8 +249,12 @@ def load_checkpoint(path, data_root=None):
     if 'weights_only' in inspect.signature(torch.load).parameters:
         kwargs['weights_only'] = True
     payload = torch.load(Path(path), **kwargs)
-    if (not isinstance(payload, dict) or payload.get('format') != CHECKPOINT_FORMAT or
-            payload.get('version') != CHECKPOINT_VERSION):
+    if not isinstance(payload, dict) or payload.get('format') != CHECKPOINT_FORMAT:
+        raise ValueError('Unsupported cascade inference checkpoint format/version')
+    if payload.get('version') == 2:
+        raise ValueError('Version 2 checkpoints require the source revision that created them '
+                         'due to the observation layout change')
+    if payload.get('version') != CHECKPOINT_VERSION:
         raise ValueError('Unsupported cascade inference checkpoint format/version')
     try:
         metadata = payload['metadata']

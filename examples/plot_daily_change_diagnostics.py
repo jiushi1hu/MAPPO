@@ -145,7 +145,8 @@ def make_operation_figure(series_by_label):
             raise ValueError('Trajectory plots require both permitted level bounds')
         lower, upper = (np.asarray(series[name]) for name in LEVEL_BOUND_FIELDS)
         days = np.arange(1, len(series['dates'])+1)
-        starts = np.r_[0, np.flatnonzero(np.diff(series['years']))+1]
+        years = np.asarray(series['years'])
+        starts = np.r_[0, np.flatnonzero(np.diff(years))+1]
         for index, reservoir in enumerate(IDS):
             level_ax, release_ax = axes[index, 2*column:2*column+2]
             level_ax.fill_between(days, lower[:, index], upper[:, index],
@@ -163,7 +164,7 @@ def make_operation_figure(series_by_label):
         axes[0, 2*column+1].set_title(label+' · Executed release')
         axes[0, 2*column].legend(fontsize=8)
         for ax in axes[-1, 2*column:2*column+2]:
-            ax.set_xticks(days[starts], series['years'][starts])
+            ax.set_xticks(days[starts], years[starts])
             ax.set_xlabel('Source year in episode order')
     figure.suptitle('Held-out operation trajectories')
     return figure

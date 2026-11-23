@@ -23,8 +23,10 @@ PREVIOUS_ACTOR_OBSERVATION_LAYOUT = 'local_neighbors_next_day_limits_next7d_fore
 CRITIC_STATE_LAYOUT = 'system_storage_inflow_release_limits_next7d_forecasts_v3'
 VOLUME_CRITIC_STATE_LAYOUT = 'system_storage_inflow_release_limits_forecasts_targets_future_volumes_v2'
 TARGET_CRITIC_STATE_LAYOUT = 'system_storage_inflow_release_limits_next7d_forecasts_terminal_targets_v1'
-CASCADE_ACTOR_OBSERVATION_LAYOUT = 'cascade_local_upstream_downstream_system_v7'
-CASCADE_CRITIC_STATE_LAYOUT = 'concatenated_five_actor_observations_v1'
+CASCADE_OBSERVATION_LAYOUTS = {
+    'cascade_local_upstream_downstream_system_v7': ('concatenated_five_actor_observations_v1', 22, 110),
+    'cascade_local_upstream_downstream_system_v8': ('concatenated_five_actor_observations_v2', 21, 105),
+}
 FORECAST_INPUT = 'five_reservoir_next7d_mean_inflow_forecast_1965_2024.csv'
 SHARED_FIELDS = (
     'episode_horizon_days', 'parallel_environments', 'episodes_per_seed',
@@ -134,14 +136,15 @@ def _observation_dimensions(run):
     critic_layout = architecture.get('critic_state_layout')
     state_size = 38 if daily_limits else 18
     raw_dim = 15 if daily_limits else 11
-    if actor_layout == CASCADE_ACTOR_OBSERVATION_LAYOUT:
+    if actor_layout in CASCADE_OBSERVATION_LAYOUTS:
+        expected_critic, raw_dim, state_size = CASCADE_OBSERVATION_LAYOUTS[actor_layout]
         if not has_forecast:
             raise ValueError('The cascade actor observation layout requires the inflow forecast input hash')
-        if critic_layout != CASCADE_CRITIC_STATE_LAYOUT:
-            raise ValueError('The cascade actor observation layout requires the concatenated critic state layout')
-        if architecture.get('critic_state_size') != 110:
+        if critic_layout != expected_critic:
+            raise ValueError('The cascade actor observation layout requires the matching critic state layout')
+        if architecture.get('critic_state_size') != state_size:
             raise ValueError('Critic state size does not match its observation layout')
-        return 22, 110
+        return raw_dim, state_size
     if actor_layout in (ACTOR_OBSERVATION_LAYOUT, TARGET_ACTOR_OBSERVATION_LAYOUT, VOLUME_ACTOR_OBSERVATION_LAYOUT):
         if not has_forecast:
             raise ValueError('The current actor observation layout requires the inflow forecast input hash')

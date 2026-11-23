@@ -8,9 +8,9 @@ train:
   use_linear_lr_decay: false
   use_proper_time_limits: true
 model:
-  # Every actor uses the same 22-feature local/upstream/downstream/system
+  # Every actor uses the same 21-feature local/upstream/downstream/system
   # layout. The centralized critic receives the five observations concatenated
-  # in WDD/BHT/XLD/XJB/THR order (110 features).
+  # in WDD/BHT/XLD/XJB/THR order (105 features).
   # Flattened encoder [64, 128, 256] + one 256-unit hidden head.
   # Actors and the critic build separate MLPs with this same layout.
   hidden_sizes: [64, 128, 256, 256]

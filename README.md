@@ -70,17 +70,16 @@ projection, seasonal refill budget or terminal-deviation reward. Storage is
 always calculated from executed flows. Episode boundaries still stop value
 bootstrapping; this is independent of reservoir inventory requirements.
 
-Actor observations use one fixed 22-feature layout for all five reservoirs. The
-first 14 local features are normalized current water level; actual total inflow
+Actor observations use one fixed 21-feature layout for all five reservoirs. The
+first 13 local features are normalized current water level; actual total inflow
 (external or incremental inflow plus the previous day's executed upstream
 release) divided by release capacity; the supplied issued next-seven-day mean
 incremental inflow forecast, standardized using training-year actual-inflow
 statistics; seasonal sine and cosine; next-day maximum and minimum permitted
 water levels; the previous requested normalized action; current storage ratio;
 remaining regulation-capacity ratio; previous actual total release, turbine
-release and power, each divided by its capacity; and the previous realized action
-after environmental correction. The next three features are the immediate
-upstream reservoir's water level, actual release and issued forecast; WDD uses
+release and power, each divided by its capacity. The next three features are the
+immediate upstream reservoir's water level, actual release and issued forecast; WDD uses
 `[0, 0, 0]`. The next two are the immediate downstream reservoir's water level
 and remaining regulation-capacity ratio; THR uses `[0, 1]`. The final three are
 total storage divided by combined normal storage, total realized power divided by
@@ -90,9 +89,9 @@ through September 30 and 0 otherwise.
 Forecasts are read from the supplied file, including at nonconsecutive held-out
 year joins; they are not recomputed from future actual inflows. The centralized
 critic receives the five observations concatenated in WDD/BHT/XLD/XJB/THR order,
-for 110 input features. Checkpoints record the observation and critic layouts;
-version 2 checkpoints use this contract, and earlier checkpoints cannot be loaded
-because their observation dimensions and source hashes differ.
+for 105 input features. Version 3 checkpoints record this actor and critic
+layout. Replay of earlier checkpoints requires the source revision that saved
+them.
 
 For categorical action k among K commands:
 

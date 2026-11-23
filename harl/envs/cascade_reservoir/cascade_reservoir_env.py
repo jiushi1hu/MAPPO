@@ -11,8 +11,8 @@ from harl.envs.cascade_reservoir.episodes import (
 from harl.envs.cascade_reservoir.level_ramp import (
     RAMP_LEVEL_TOLERANCE_M, daily_level_ramp_limits)
 
-ACTOR_OBSERVATION_LAYOUT = 'cascade_local_upstream_downstream_system_v7'
-CRITIC_STATE_LAYOUT = 'concatenated_five_actor_observations_v1'
+ACTOR_OBSERVATION_LAYOUT = 'cascade_local_upstream_downstream_system_v8'
+CRITIC_STATE_LAYOUT = 'concatenated_five_actor_observations_v2'
 
 # The order is a public data contract. Keep it identical for every reservoir.
 ACTOR_OBSERVATION_FEATURES = (
@@ -29,7 +29,6 @@ ACTOR_OBSERVATION_FEATURES = (
     'actual_total_release_fraction_of_release_capacity',
     'actual_turbine_release_fraction_of_turbine_capacity',
     'actual_power_fraction_of_installed_capacity',
-    'realized_action_after_environmental_correction',
     'upstream_water_level_fraction',
     'upstream_actual_release_fraction_of_release_capacity',
     'upstream_next7d_mean_incremental_inflow_forecast_standardized',
@@ -44,7 +43,7 @@ CRITIC_STATE_SIZE = len(IDS) * ACTOR_OBSERVATION_SIZE
 
 
 def actor_observation_features(use_daily_level_limits=None):
-    """Return the fixed 22-feature contract; daily limits change values, not layout."""
+    """Return the fixed 21-feature layout for either daily-limit setting."""
     return ACTOR_OBSERVATION_FEATURES
 
 
@@ -66,9 +65,8 @@ def _level_curve(data, storage):
 
 
 def actor_observations_from_components(data, level_limits, storage, previous_release,
-        previous_requested_action, previous_realized_action, previous_power,
-        previous_turbine, index):
-    """Build the exact 22-feature layout from decision-time components.
+        previous_requested_action, previous_power, previous_turbine, index):
+    """Build the 21-feature layout from decision-time components.
 
     ``actual_total_inflow`` is the physically available inflow at the decision
     instant: external/incremental inflow plus the previous day's executed
@@ -85,16 +83,13 @@ def actor_observations_from_components(data, level_limits, storage, previous_rel
     index = np.asarray(index, dtype=np.int64).reshape(-1)
     if index.shape != (rows,):
         raise ValueError('Observation index must have one entry per storage row')
-    fields = (previous_release, previous_requested_action, previous_realized_action,
-              previous_power, previous_turbine)
+    fields = (previous_release, previous_requested_action, previous_power, previous_turbine)
     arrays = [np.asarray(value, dtype=np.float64) for value in fields]
     if any(value.shape != storage.shape or not np.isfinite(value).all() for value in arrays):
         raise ValueError('Observation components must be finite (rows, 5) matrices')
-    previous_release, previous_requested_action, previous_realized_action, previous_power, previous_turbine = arrays
+    previous_release, previous_requested_action, previous_power, previous_turbine = arrays
     if ((previous_requested_action < 0.) | (previous_requested_action > 1.)).any():
         raise ValueError('Previous requested actions must be normalized to [0, 1]')
-    if ((previous_realized_action < 0.) | (previous_realized_action > 1.)).any():
-        raise ValueError('Previous realized actions must be normalized to [0, 1]')
 
     levels = _level_curve(data, storage)
     external = np.asarray(data.external[index], dtype=np.float64)
@@ -145,19 +140,18 @@ def actor_observations_from_components(data, level_limits, storage, previous_rel
         observations[:, i, 10] = release_fraction[:, i]
         observations[:, i, 11] = turbine_fraction[:, i]
         observations[:, i, 12] = power_fraction[:, i]
-        observations[:, i, 13] = previous_realized_action[:, i]
         if i:
-            observations[:, i, 14] = (levels[:, i-1]-level_min[i-1])/level_span[i-1]
-            observations[:, i, 15] = release_fraction[:, i-1]
-            observations[:, i, 16] = forecast_standardized[:, i-1]
+            observations[:, i, 13] = (levels[:, i-1]-level_min[i-1])/level_span[i-1]
+            observations[:, i, 14] = release_fraction[:, i-1]
+            observations[:, i, 15] = forecast_standardized[:, i-1]
         if i < len(IDS)-1:
-            observations[:, i, 17] = (levels[:, i+1]-level_min[i+1])/level_span[i+1]
-            observations[:, i, 18] = remaining_ratio[:, i+1]
+            observations[:, i, 16] = (levels[:, i+1]-level_min[i+1])/level_span[i+1]
+            observations[:, i, 17] = remaining_ratio[:, i+1]
         else:
-            observations[:, i, 18] = 1.
-        observations[:, i, 19] = system_storage
-        observations[:, i, 20] = system_power
-        observations[:, i, 21] = flood
+            observations[:, i, 17] = 1.
+        observations[:, i, 18] = system_storage
+        observations[:, i, 19] = system_power
+        observations[:, i, 20] = flood
     if not np.isfinite(observations).all():
         raise FloatingPointError('Non-finite reservoir actor observations')
     return observations.astype(np.float32)
@@ -219,8 +213,8 @@ class CascadeReservoirEnv:
         self.observation_features = actor_observation_features(self.use_daily_level_limits)
         self.observation_size = len(self.observation_features)
         self.state_size = critic_state_size(self.use_daily_level_limits)
-        if self.observation_size != 22 or self.state_size != 110:
-            raise ValueError('The cascade observation contract requires 22 actor and 110 critic features')
+        if self.observation_size != 21 or self.state_size != 105:
+            raise ValueError('The cascade observation contract requires 21 actor and 105 critic features')
         self.observation_space = [Box(-np.inf, np.inf, (self.observation_size,), dtype=np.float32) for _ in range(5)]
         self.share_observation_space = [Box(-np.inf, np.inf, (self.state_size,), dtype=np.float32) for _ in range(5)]
         if (isinstance(action_bins, bool) or
@@ -331,7 +325,6 @@ class CascadeReservoirEnv:
         self.storage = storage
         self.previous_release = np.zeros(5)
         self.previous_requested_action = np.zeros(5)
-        self.previous_realized_action = np.zeros(5)
         self.previous_power = np.zeros(5)
         self.previous_turbine = np.zeros(5)
         self.last_transition = None
@@ -349,8 +342,7 @@ class CascadeReservoirEnv:
             return np.zeros((5,self.observation_size),dtype=np.float32)
         return actor_observations_from_components(self.data, self.level_limits,
             self.storage[None], self.previous_release[None],
-            self.previous_requested_action[None], self.previous_realized_action[None],
-            self.previous_power[None], self.previous_turbine[None],
+            self.previous_requested_action[None], self.previous_power[None], self.previous_turbine[None],
             np.asarray([self.index], dtype=np.int64))[0]
 
     def _observations(self):
@@ -420,7 +412,6 @@ class CascadeReservoirEnv:
         self.storage = result['storage_end'].copy()
         self.previous_release = result['release'].copy()
         self.previous_requested_action = normalized.copy()
-        self.previous_realized_action = result['normalized_actions'].copy()
         self.previous_power = result['power'].copy()
         self.previous_turbine = result['turbine'].copy()
         self.index += 1
