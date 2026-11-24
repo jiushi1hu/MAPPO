@@ -12,7 +12,9 @@ from pathlib import Path
 import numpy as np
 
 from harl.envs.cascade_reservoir.data_loader import IDS
+from harl.envs.cascade_reservoir.dispatch_kernel import release_from_normalized_action
 from harl.envs.cascade_reservoir.learning_signal import critic_reward_spec
+from harl.envs.cascade_reservoir.reward import ecological_flow_shortfall
 
 
 _PHYSICAL_COLUMNS = {
@@ -35,24 +37,33 @@ _SERVICE_COLUMNS = {
     'ecological_flow_deficit_m3': ('service_shortfall_integrals', 'ecological_flow'),
 }
 _SCALAR_COLUMNS = ('global_reward', 'system_reward', 'reward', 'generation_reward')
+ECOLOGICAL_ACTION_DIAGNOSTIC_FIELDS = (
+    'argmax_action_index', 'argmax_action_probability', 'ecological_threshold_m3s',
+    'min_ecological_compliant_action_index', 'min_ecological_compliant_action_probability',
+    'compliant_action_probability_mass',
+)
 TRAJECTORY_DIAGNOSTIC_FIELDS = (
     'seed', 'update', 'episode', 'parallel_env_index', 'window_start_year',
     'source_years', 'episode_step', 'date', 'reservoir_id', 'value_channel',
+    'collection_policy_update', 'probability_source', 'action_selection',
     *_PHYSICAL_COLUMNS,
     'local_ecological_flow_penalty',
     *_SERVICE_COLUMNS, 'global_reward', 'system_reward', 'legacy_team_reward',
     'legacy_generation_reward', 'sampled_action_index', 'effective_action_index',
     'action_bins', 'forced_action', 'sampled_action_probability',
     'sampled_action_log_probability', 'effective_action_probability',
-    'effective_action_log_probability', 'entropy', 'learning_reward',
+    'effective_action_log_probability', 'entropy', *ECOLOGICAL_ACTION_DIAGNOSTIC_FIELDS,
+    'learning_reward',
     'learning_reward_source', 'value_basis', 'critic_reward_layout', 'own_reward_for_learning',
     'own_value_frozen', 'own_next_value_frozen', 'next_state_mask', 'td_residual',
     'gae_target', 'raw_advantage', 'normalized_advantage', 'realized_reward_to_go',
     'episode_time_weight', 'policy_objective_weight', 'actor_advantage_estimator',
 )
-_OPTIONAL_COLUMNS = set(_SERVICE_COLUMNS)
+_OPTIONAL_COLUMNS = set(_SERVICE_COLUMNS) | set(ECOLOGICAL_ACTION_DIAGNOSTIC_FIELDS[2:]) | {
+    'effective_action_probability', 'effective_action_log_probability'}
 _TEXT_COLUMNS = {'date', 'reservoir_id', 'source_years',
-                 'learning_reward_source', 'value_basis', 'critic_reward_layout', 'actor_advantage_estimator'}
+                 'learning_reward_source', 'value_basis', 'critic_reward_layout', 'actor_advantage_estimator',
+                 'probability_source', 'action_selection'}
 _SUMMARY_FIELDS = ('local_reward', 'mixed_reward', 'learning_reward', 'own_value_frozen', 'td_residual',
                    'raw_advantage', 'normalized_advantage', 'realized_reward_to_go')
 
@@ -83,6 +94,45 @@ def _number(value, name):
     if not np.isfinite(number):
         raise ValueError(name+' must be a finite scalar')
     return number
+
+
+def ecological_action_diagnostics(probabilities, lower, upper, threshold, *, forced_release=None):
+    """Measure a policy against realized same-day bounds, without changing actions.
+
+    Compliance uses the reward's tolerance and includes zero-probability commands
+    in the physical minimum. A forced interval executes the same release for every
+    index. These are conditional diagnostics, never an actor action mask.
+    """
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+    if (probabilities.ndim != 1 or probabilities.size < 2 or
+            not np.isfinite(probabilities).all() or (probabilities < 0.).any() or
+            not np.isclose(probabilities.sum(), 1., rtol=1e-5, atol=1e-7)):
+        raise ValueError('Action probabilities must be a normalized finite categorical vector')
+    argmax = int(probabilities.argmax())
+    result = dict(argmax_action_index=argmax, argmax_action_probability=float(probabilities[argmax]),
+        ecological_threshold_m3s=None, min_ecological_compliant_action_index=None,
+        min_ecological_compliant_action_probability=None, compliant_action_probability_mass=None)
+    if threshold is None:
+        return result
+    threshold = _number(threshold, 'ecological threshold')
+    if threshold < 0.:
+        raise ValueError('Ecological threshold must be nonnegative')
+    if forced_release is None:
+        lower, upper = _number(lower, 'release lower bound'), _number(upper, 'release upper bound')
+        if lower > upper:
+            raise ValueError('Diagnostic release bounds must be ordered')
+        releases = release_from_normalized_action(lower, upper,
+            np.arange(probabilities.size, dtype=np.float64)/(probabilities.size-1))
+    else:
+        releases = np.full(probabilities.size, _number(forced_release, 'forced release'))
+    compliant = ecological_flow_shortfall(threshold, releases) == 0.
+    indices = np.flatnonzero(compliant)
+    minimum = int(indices[0]) if indices.size else None
+    result.update(ecological_threshold_m3s=threshold,
+        min_ecological_compliant_action_index=minimum,
+        min_ecological_compliant_action_probability=None if minimum is None else float(probabilities[minimum]),
+        compliant_action_probability_mass=float(probabilities[compliant].sum()))
+    return result
 
 
 class _Summary:
@@ -122,8 +172,9 @@ class TrajectoryDiagnosticsWriter:
     """Exclusive CSV owner, retaining at most one batch of copied physical data.
 
     The sampled probability belongs to the frozen collection distribution.
-    Effective probabilities on forced rows are synthetic ``exp(0)=1`` buffer
-    placeholders, not policy likelihoods. Their objective weight is zero.
+    Effective probabilities on forced rows are left blank, excluding synthetic
+    ``exp(0)=1`` buffer placeholders. Actual sampled-command likelihoods and
+    policy entropy remain available; their objective weight is zero.
     Each actor row has uniform temporal weight and its reservoir's mixed-return
     value and advantage.
     """
@@ -290,7 +341,13 @@ class TrajectoryDiagnosticsWriter:
         self._require_open()
         if self._batch is None or not self._transitions or before is None:
             raise ValueError('A captured batch and frozen before-update diagnostics are required')
+        collection_update = _integer(before['collection_policy_update'], 'collection policy update')
+        if collection_update != self._batch['update']-1:
+            raise ValueError('Collection policy must precede the trajectory optimization update')
         rewards, frozen, masks, gamma, actors = self._learning_arrays(runner, before)
+        requirements = getattr(runner.data, 'service_requirements', None)
+        thresholds = (None if requirements is None else
+                      _array(requirements.ecological_flow_m3s, (len(IDS),), 'ecological thresholds'))
         spec = critic_reward_spec(runner, rewards.shape[-1])
         captured = np.asarray([[row['mixed_rewards'] for row in transitions]
                                for transitions in self._transitions], dtype=np.float32)
@@ -315,6 +372,8 @@ class TrajectoryDiagnosticsWriter:
                             (forced and (effective != 0 or actor['logs'][t,lane,0] != 0.))):
                         raise ValueError('Captured commands/controls disagree with effective rollout placeholders')
                     row = dict(seed=batch['seed'], update=batch['update'], episode=batch['episode_ids'][lane],
+                        collection_policy_update=collection_update,
+                        probability_source='collection_before_update', action_selection='sample',
                         parallel_env_index=lane, window_start_year=batch['window_starts'][lane],
                         source_years=';'.join(map(str, batch['source_years'][lane])),
                         episode_step=t+1, date=day.isoformat(), reservoir_id=reservoir, value_channel=channel)
@@ -329,8 +388,8 @@ class TrajectoryDiagnosticsWriter:
                         sampled_action_index=sampled, effective_action_index=effective, action_bins=bins,
                         forced_action=int(forced), sampled_action_probability=float(actor['probabilities'][t,lane,sampled]),
                         sampled_action_log_probability=float(actor['logits'][t,lane,sampled]),
-                        effective_action_log_probability=float(actor['logs'][t,lane,0]),
-                        effective_action_probability=float(np.exp(actor['logs'][t,lane,0])),
+                        effective_action_log_probability=None if forced else float(actor['logs'][t,lane,0]),
+                        effective_action_probability=None if forced else float(np.exp(actor['logs'][t,lane,0])),
                         entropy=float(actor['entropy'][t,lane]), learning_reward=float(rewards[t,lane,channel]),
                         learning_reward_source=actor['learning_reward_source'], value_basis=actor['value_basis'],
                         critic_reward_layout=actor['critic_reward_layout'],
@@ -347,6 +406,10 @@ class TrajectoryDiagnosticsWriter:
                         realized_reward_to_go=float(frozen['mc'][t,lane,channel]),
                         episode_time_weight=float(actor['time'][t,lane,0]),
                         policy_objective_weight=float(actor['weights'][t,lane,0]))
+                    row.update(ecological_action_diagnostics(actor['probabilities'][t,lane],
+                        transition['low'][i], transition['high'][i],
+                        None if thresholds is None else thresholds[i],
+                        forced_release=transition['release'][i] if forced else None))
                     cells = []
                     for key in TRAJECTORY_DIAGNOSTIC_FIELDS:
                         value = row[key]
@@ -364,7 +427,8 @@ class TrajectoryDiagnosticsWriter:
                         windows['october_may'][reservoir].update(row, transition['timestep_seconds'])
         self.stream.flush()
         self.rows_written += count
-        summary = dict(schema='cascade_trajectory_v3', file=str(self.path.resolve()), rows=count,
+        summary = dict(schema='cascade_trajectory_v4', file=str(self.path.resolve()), rows=count,
+            collection_policy_update=collection_update, optimization_update=batch['update'],
             total_rows_written=self.rows_written, episode_horizon_days=len(self._transitions),
             parallel_environments=len(batch['episode_ids']), gamma=gamma,
             critic_reward_layout=spec['layout'], critic_fitted_reward_basis=spec['fitted_reward_basis'],
@@ -377,7 +441,10 @@ class TrajectoryDiagnosticsWriter:
             policy_objective_weight='policy active mask only',
             value_source='before_update snapshot in reward units before optimization and ValueNorm changes',
             own_column_interpretation='reservoir-specific mixed reward and value',
-            probability_source='before_update collection distribution; forced effective probability/log-probability are 1/0 placeholders',
+            probability_source='collection_before_update; forced effective probability/log-probability are blank; '
+                               'sampled probabilities and entropy are real policy measurements',
+            ecological_action_scope='realized same-day bounds conditional on current upstream releases; '
+                                    'reward tolerance; blank minimum if unattainable; blank ecological fields if unavailable',
             repeated_accounting_scalars=['global_reward', 'system_reward', 'legacy_team_reward', 'legacy_generation_reward'],
             interpretation='observational correlated training rows; realized reward-to-go is not expected value; '
                            'spill and advantage association does not establish avoidability or causation',

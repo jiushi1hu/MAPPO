@@ -23,6 +23,8 @@ from harl.envs.cascade_reservoir.evaluation import (
 from harl.envs.cascade_reservoir.reservoir_physics import InfeasibleCascade
 from harl.envs.cascade_reservoir.reward import (
     EpisodeRewardMetrics, reward_metadata, validate_discount_factor)
+from harl.envs.cascade_reservoir.trajectory_diagnostics import (
+    ECOLOGICAL_ACTION_DIAGNOSTIC_FIELDS, ecological_action_diagnostics)
 from harl.models.policy_models.stochastic_policy import StochasticPolicy
 from harl.models.value_function_models.v_net import VNet
 
@@ -35,6 +37,7 @@ REPLAY_TRACE_FIELDS = (
     'policy_action_index', 'command_action_index', 'effective_action_index',
     'action_overridden', 'controllable', 'normalized_action', 'mapping_fraction',
     'policy_action_probability', 'command_probability', 'command_log_probability', 'entropy',
+    'probability_source', 'action_selection', *ECOLOGICAL_ACTION_DIAGNOSTIC_FIELDS,
     'storage_start_m3', 'storage_end_m3', 'level_start_m', 'level_end_m',
     'external_inflow_m3s', 'inflow_m3s', 'release_m3s', 'turbine_flow_m3s', 'spill_m3s',
     'spill_volume_m3', 'net_head_m', 'power_MW', 'energy_MWh',
@@ -174,7 +177,7 @@ def save_checkpoint(runner, path):
     if any(_file_hash(runner.data.root/name) != expected for name, expected in data_hashes.items()):
         raise ValueError('Source dataset changed after it was loaded')
     settings = _plain(dict(physical=runner.physical_config, algorithm=runner.algo_args))
-    metadata = _plain(dict(seed=runner.seed, policy_update=runner.update_count,
+    metadata = _plain(dict(seed=runner.seed, policy_update=runner.update_count, policy_stage='post_update',
         policy_episode=runner.completed_episodes, training_steps=runner.training_steps,
         episode_horizon_days=runner.length, action_bins=runner.action_bins,
         reservoir_ids=list(IDS), **layout_metadata,
@@ -214,7 +217,8 @@ def save_checkpoint(runner, path):
         raise
     return dict(path=str(path.resolve()), sha256=_file_hash(path),
         format=CHECKPOINT_FORMAT, version=CHECKPOINT_VERSION,
-        policy_update=int(runner.update_count), policy_episode=int(runner.completed_episodes),
+        policy_update=int(runner.update_count), policy_stage='post_update',
+        policy_episode=int(runner.completed_episodes),
         training_steps=int(runner.training_steps), episode_horizon_days=int(runner.length),
         action_bins=int(runner.action_bins), source_hashes=metadata['source_hashes'],
         data_hashes=data_hashes, settings_sha256=metadata['settings_sha256'])
@@ -491,6 +495,7 @@ class FrozenCascadePolicy:
                     command_probability=float(distribution.probs[0, commands[i]]),
                     command_log_probability=float(distribution.log_probs(torch.tensor([[commands[i]]])).item()),
                     entropy=float(distribution.entropy().item()),
+                    probability_source='checkpoint_post_update', action_selection='argmax',
                     local_generation_reward=float(transition['local_generation_rewards'][i]),
                     local_reward_penalty=float(transition['local_reward_penalties'][i]),
                     local_reward=float(transition['local_rewards'][i]), global_reward=float(transition['global_reward']),
@@ -507,6 +512,11 @@ class FrozenCascadePolicy:
                     realized_legacy_team_reward_to_go=0.,
                     ecological_flow_shortfall_m3s=None if shortfalls is None else float(shortfalls['ecological_flow'][i]),
                     ecological_flow_deficit_m3=None if integrals is None else float(integrals['ecological_flow'][i]))
+                requirements = env.operation_reward.requirements
+                row.update(ecological_action_diagnostics(distribution.probs[0].detach().cpu().numpy(),
+                    transition['low'][i], transition['high'][i],
+                    None if requirements is None else requirements.ecological_flow_m3s[i],
+                    forced_release=transition['release'][i] if not transition['controls'][i] else None))
                 for field, source in (
                     ('storage_start_m3', 'storage_start'), ('storage_end_m3', 'storage_end'),
                     ('level_start_m', 'levels_start'), ('level_end_m', 'levels_end'),

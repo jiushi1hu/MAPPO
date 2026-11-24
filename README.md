@@ -282,6 +282,33 @@ components, frozen values, GAE and policy masks per reservoir/day/lane. Global,
 system and legacy scalar rewards repeat across five CSV rows; count each once
 per day/lane when reconstructing totals.
 
+For future runs, retain both per-seed final checkpoints and collection traces with
+`--episode-log runs/EXPERIMENT.jsonl --save-checkpoints --trajectory-diagnostics`.
+These are opt-in output flags; they do not change the policy or dispatch.
+Checkpoints go to `runs/EXPERIMENT_seed<seed>_checkpoints/update_<update>.pt`;
+trajectory rows go to `runs/EXPERIMENT_seed<seed>_trajectory.csv`. Optionally add
+`--checkpoint-interval N` to also save every N completed updates; the default
+of zero saves only the final completed update.
+
+Trajectory `update` identifies the optimization batch. Its probabilities and
+entropy come from the frozen **collection** policy, identified separately by
+`collection_policy_update` (one less than `update`) and
+`probability_source=collection_before_update`. Checkpoints are labeled
+`policy_stage=post_update`; checkpoint replay uses
+`probability_source=checkpoint_post_update` and argmax selection. A checkpoint
+after update N belongs to the following collection batch, not batch N.
+
+Both traces include argmax index/probability, ecological threshold, minimum
+compliant index/probability, and `compliant_action_probability_mass`. Compliance
+uses the realized same-day feasible bounds and the reward's numerical tolerance;
+it is conditional on current upstream releases, not information supplied to the
+actor. An unattainable requirement has a blank minimum and zero compliant mass.
+Unavailable requirements leave ecological diagnostics blank. Zero requirements
+admit every command. Forced intervals use their actual executed release for all
+commands. Training rows leave synthetic effective probability/log-probability
+placeholders blank, while retaining genuine sampled-command likelihoods and
+policy entropy; exclude `forced_action=1` rows from controllable-action statistics.
+
 ```bash
 python -B examples/replay_cascade_checkpoint.py \
   --checkpoint runs/EXPERIMENT_seed1_checkpoints/update_000050.pt \
