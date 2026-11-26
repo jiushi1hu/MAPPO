@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import yaml
+from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
 from harl.algorithms.critics.v_critic import validate_value_normalization
 from harl.envs.cascade_reservoir.data_loader import (
     CascadeData, HEAD_MODELS, resolve_year_split, validate_service_scale)
@@ -44,8 +45,12 @@ def main(argv=None):
                         help='Exactly five held-out years; the other 55 years are used for training')
     parser.add_argument('--seeds',nargs='+',type=int)
     parser.add_argument('--action-bins',type=int,help='Discrete actions per reservoir (default: 100)')
+    parser.add_argument('--flow-observation-scale', type=float,
+                        help='Multiplier for capacity-normalized Actor features 2, 11 and 15 (default: 1)')
     parser.add_argument('--gamma',type=float,help='Discount factor in [0,1]; 1 gives undiscounted episode return')
     parser.add_argument('--gae-lambda',type=float,help='GAE trace parameter in [0,1]')
+    parser.add_argument('--advantage-normalization', choices=tuple(NORMALIZATION_LABELS),
+                        help='Rows used to standardize each Actor advantage channel (default: all_rows)')
     parser.add_argument('--ppo-epochs',type=int,help='Actor optimization epochs per collection round')
     parser.add_argument('--head-model',choices=HEAD_MODELS)
     parser.add_argument('--feasibility-mode',choices=FEASIBILITY_MODES,
@@ -110,13 +115,15 @@ def main(argv=None):
         exp.pop('evaluation_labels',None)
     if args.action_bins is not None:
         model['action_bins'] = args.action_bins
+    if args.advantage_normalization is not None:
+        algo['advantage_normalization'] = args.advantage_normalization
     if args.ppo_epochs is not None:
         algo['ppo_epoch'] = args.ppo_epochs
     if args.head_model is not None:
         physical['head_model'] = args.head_model
     if args.feasibility_mode is not None:
         physical['feasibility_mode'] = args.feasibility_mode
-    for name in ('ecological_flow_scale',):
+    for name in ('ecological_flow_scale', 'flow_observation_scale'):
         value = getattr(args,name)
         if value is not None:
             physical[name] = value
@@ -143,6 +150,7 @@ def main(argv=None):
             raise ValueError('Categorical control requires at least two action bins')
         algo['gamma'] = validate_discount_factor(algo['gamma'] if args.gamma is None else args.gamma)
         algo['gae_lambda'] = validate_gae_lambda(algo['gae_lambda'] if args.gae_lambda is None else args.gae_lambda)
+        algo['advantage_normalization'] = advantage_mode(algo)
         algo['ppo_epoch'] = positive_integer(algo['ppo_epoch'], 'ppo_epoch')
         validate_value_normalization(algo['use_clipped_value_loss'],train['use_valuenorm'])
         for name in ('critic_epoch','actor_num_mini_batch','critic_num_mini_batch'):
@@ -152,7 +160,7 @@ def main(argv=None):
                 raise ValueError(name+' must divide all collected daily transitions')
         if not isinstance(physical.get('use_daily_level_limits'),bool):
             raise ValueError('use_daily_level_limits must be a boolean')
-        for name in ('ecological_flow_scale',):
+        for name in ('ecological_flow_scale', 'flow_observation_scale'):
             physical[name] = validate_service_scale(physical.get(name,1.),name)
         daily_level_ramp_limits(physical)
         physical['feasibility_mode'] = validate_feasibility_mode(

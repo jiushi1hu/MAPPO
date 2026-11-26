@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from gym.spaces import Box
 
+from harl.common.advantages import active_row_advantages, advantage_mode
 from harl.common.buffers.on_policy_actor_buffer import OnPolicyActorBuffer
 
 
@@ -150,13 +151,8 @@ def joint_shared_actor_batch(core, buffers, own_advantages, num_agents):
         advantages = np.asarray(advantages, dtype=np.float32).copy()
         if advantages.shape != (days, lanes, 1) or not np.isfinite(advantages).all():
             raise ValueError('Shared MAPPO requires finite, aligned own advantage arrays')
-        if not core.args.get('normalize_shared_advantages', False):
-            active = buffer.active_masks[:-1] > 0.
-            if active.any():
-                selected = advantages[active]
-                advantages = (advantages-selected.mean())/(selected.std()+1e-5)
-            else:
-                advantages.fill(0.)
+        if advantage_mode(core.args) == 'active_rows':
+            advantages = active_row_advantages(advantages, buffer.active_masks[:-1])
         normalized.append(advantages)
 
     joint = OnPolicyActorBuffer(dict(episode_length=days, n_rollout_threads=lanes*num_agents),

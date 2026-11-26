@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from examples import plot_cascade_parallel as legacy
+from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
 
 
 COLOR = '#2563eb'
@@ -183,9 +184,8 @@ def _validate_architecture(run):
         legacy_layout = layout == 'mixed_by_reservoir_then_legacy_team'
         if layout not in ('mixed_by_reservoir', 'mixed_by_reservoir_then_legacy_team'):
             raise ValueError('Unsupported MAPPO learning reward layout')
-        normalization = ('per_reservoir_over_common_rollout_rows'
-            if settings.get('algo', {}).get('normalize_shared_advantages', not legacy_layout)
-            else 'per_reservoir_over_controllable_rows')
+        normalization = NORMALIZATION_LABELS[advantage_mode(
+            settings.get('algo', {}), legacy_all_rows=not legacy_layout)]
         expected_objective = dict(advantage_source='individual_mixed',
             reward_formula='0.5 * own local reward + 0.5 * global generation reward',
             critic_reward_layout=layout, actor_value_channels=list(range(5)),

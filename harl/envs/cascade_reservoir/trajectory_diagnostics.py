@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from harl.common.advantages import active_row_advantages, advantage_mode, all_row_advantages
 from harl.envs.cascade_reservoir.data_loader import IDS
 from harl.envs.cascade_reservoir.dispatch_kernel import release_from_normalized_action
 from harl.envs.cascade_reservoir.learning_signal import critic_reward_spec
@@ -293,9 +294,8 @@ class TrajectoryDiagnosticsWriter:
         if not 0. <= gamma <= 1.:
             raise ValueError('gamma must be between zero and one')
         raw = frozen['gae_targets']-frozen['prediction']
-        shared = runner.algo_args['algo'].get('normalize_shared_advantages', False)
-        common = ((raw-raw.mean(axis=(0, 1), keepdims=True))/
-                  (raw.std(axis=(0, 1), keepdims=True)+1e-5) if shared else None)
+        mode = advantage_mode(runner.algo_args['algo'])
+        prepared = all_row_advantages(raw) if mode == 'all_rows' else raw
         if len(before['distributions']) != len(IDS):
             raise ValueError('One frozen collection distribution per reservoir is required')
         actors = []
@@ -306,13 +306,9 @@ class TrajectoryDiagnosticsWriter:
                 raise ValueError('Actor masks must match complete rollout boundaries')
             channel = spec['actor_channels'][i]
             advantage = raw[..., channel:channel+1]
-            if shared:
-                normalized = common[..., channel:channel+1]
-            elif active.any():
-                selected = advantage[active > 0.]
-                normalized = (advantage-selected.mean())/(selected.std()+1e-5)
-            else:
-                normalized = np.zeros_like(advantage)
+            normalized = prepared[..., channel:channel+1]
+            if mode == 'active_rows':
+                normalized = active_row_advantages(advantage, active)
             # Keep the existing CSV column, with uniform temporal weight for
             # every row. Gamma is used below only in the frozen TD residual.
             time = np.ones((days, lanes, 1), dtype=np.float32)
@@ -438,6 +434,8 @@ class TrajectoryDiagnosticsWriter:
             actor_temporal_weighting='uniform_rollout_rows',
             actor_objective_reduction='mean over all rollout rows; policy active masks zero forced rows',
             episode_time_weight='always 1.0; column retained for CSV compatibility',
+            advantage_normalization=advantage_mode(runner.algo_args['algo']),
+            normalized_advantage_column='Actor input after configured preprocessing; raw in none mode',
             policy_objective_weight='policy active mask only',
             value_source='before_update snapshot in reward units before optimization and ValueNorm changes',
             own_column_interpretation='reservoir-specific mixed reward and value',

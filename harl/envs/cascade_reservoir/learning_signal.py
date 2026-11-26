@@ -1,5 +1,6 @@
 """Training-only learning-signal measurements on complete multi-year episodes."""
 import numpy as np
+from harl.common.advantages import active_row_advantages, advantage_mode, all_row_advantages
 
 
 def critic_reward_spec(runner, channels):
@@ -83,10 +84,8 @@ def learning_signal_report(runner, before, post_prediction):
     # Match the actual float32 training arithmetic before making float64 summaries.
     raw_advantage = targets-old_prediction
     mc_advantage = mc-old_prediction
-    shared = runner.algo_args['algo'].get('normalize_shared_advantages', False)
-    normalized_advantage = ((raw_advantage-raw_advantage.mean(axis=(0, 1), keepdims=True))/
-                            (raw_advantage.std(axis=(0, 1), keepdims=True)+1e-5)
-                            if shared else None)
+    mode = advantage_mode(runner.algo_args['algo'])
+    prepared = all_row_advantages(raw_advantage) if mode == 'all_rows' else raw_advantage
     actors = []
     for i, (actor, buffer) in enumerate(zip(runner.actor, runner.actor_buffer)):
         active = buffer.active_masks[:-1] > 0.
@@ -109,13 +108,9 @@ def learning_signal_report(runner, before, post_prediction):
         own = slice(channel, channel+1)
         actor_raw = raw_advantage[..., own]
         actor_mc_advantage = mc_advantage[..., own]
-        if shared:
-            training_advantage = normalized_advantage[..., own]
-        elif active.any():
-            selected = actor_raw[active]
-            training_advantage = (actor_raw-selected.mean())/(selected.std()+1e-5)
-        else:
-            training_advantage = np.zeros_like(actor_raw)
+        training_advantage = prepared[..., own]
+        if mode == 'active_rows':
+            training_advantage = active_row_advantages(actor_raw, active)
         comparison = _advantage_comparison(actor_raw[objective], actor_mc_advantage[objective])
         weight_sum = float(weights[objective].sum(dtype=np.float64))
         actors.append(dict(agent=i, value_channel=channel,
@@ -129,7 +124,8 @@ def learning_signal_report(runner, before, post_prediction):
             critic_mc_pre=_fit(mc[..., own], old_prediction[..., own]),
             critic_mc_post=_fit(mc[..., own], post_prediction[..., own]),
             controllable_rows=int(active.sum()), objective_rows=int(objective.sum()),
-            normalization_scope='own_channel_common_rows' if shared else 'actor_controllable_rows',
+            normalization_scope={'all_rows': 'own_channel_common_rows', 'active_rows': 'actor_controllable_rows',
+                                 'none': 'none'}[mode],
             actor_advantage_estimator='gae' if cb.use_gae else 'discounted_return',
             raw_advantage=comparison['gae'], training_advantage=signal_statistics(training_advantage[objective]),
             gae_mc_sign_disagreement_fraction=comparison['sign_disagreement_fraction'],

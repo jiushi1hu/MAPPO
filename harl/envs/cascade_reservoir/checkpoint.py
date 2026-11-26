@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
 from harl.common.valuenorm import ValueNorm
 from harl.envs.cascade_reservoir.data_loader import CascadeData, IDS
 from harl.envs.cascade_reservoir.episodes import episode_environment, positive_integer
@@ -560,10 +561,8 @@ class FrozenCascadePolicy:
             service_shortfalls=totals['service_shortfalls']))
         totals['mixed_reward_definition'] = totals['actor_reward_definition']
         totals['advantage_source'] = 'individual_mixed'
-        totals['advantage_normalization'] = (
-            'per_reservoir_over_common_rollout_rows'
-            if self.metadata['settings']['algorithm']['algo'].get('normalize_shared_advantages', False)
-            else 'per_reservoir_over_controllable_rows')
+        totals['advantage_normalization'] = NORMALIZATION_LABELS[
+            advantage_mode(self.metadata['settings']['algorithm']['algo'])]
         return dict(status='ok', phase=phase, seed=self.metadata['seed'],
             policy_update=self.metadata['policy_update'], policy_episode=self.metadata['policy_episode'],
             training_steps=self.metadata['training_steps'], source_years=used_years,

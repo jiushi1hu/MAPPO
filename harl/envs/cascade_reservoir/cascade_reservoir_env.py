@@ -2,7 +2,7 @@
 import calendar
 import numpy as np
 from gym.spaces import Box, Discrete
-from harl.envs.cascade_reservoir.data_loader import IDS
+from harl.envs.cascade_reservoir.data_loader import IDS, validate_service_scale
 from harl.envs.cascade_reservoir.reservoir_physics import (
     ReservoirPhysics, InfeasibleCascade)
 from harl.envs.cascade_reservoir.reward import OperationReward, reward_settings
@@ -65,7 +65,7 @@ def _level_curve(data, storage):
 
 
 def actor_observations_from_components(data, level_limits, storage, previous_release,
-        previous_requested_action, previous_power, previous_turbine, index):
+        previous_requested_action, previous_power, previous_turbine, index, *, flow_observation_scale=1.):
     """Build the 21-feature layout from decision-time components.
 
     ``actual_total_inflow`` is the physically available inflow at the decision
@@ -105,7 +105,8 @@ def actor_observations_from_components(data, level_limits, storage, previous_rel
     level_span = level_max-level_min
     storage_ratio = (storage-data.vmin)/storage_span
     remaining_ratio = np.clip((data.vmax-storage)/storage_span, 0., 1.)
-    release_fraction = previous_release/data.release_cap
+    # Local and upstream release features share the source reservoir's denominator.
+    release_fraction = (previous_release/data.release_cap) * flow_observation_scale
     turbine_fraction = previous_turbine/data.turbine_cap
     power_fraction = previous_power/data.power_cap
 
@@ -128,7 +129,7 @@ def actor_observations_from_components(data, level_limits, storage, previous_rel
     observations = np.zeros((rows, len(IDS), ACTOR_OBSERVATION_SIZE), dtype=np.float64)
     for i in range(len(IDS)):
         observations[:, i, 0] = (levels[:, i]-level_min[i])/level_span[i]
-        observations[:, i, 1] = total_inflow[:, i]/data.release_cap[i]
+        observations[:, i, 1] = (total_inflow[:, i]/data.release_cap[i]) * flow_observation_scale
         observations[:, i, 2] = forecast_standardized[:, i]
         observations[:, i, 3] = np.sin(phases)
         observations[:, i, 4] = np.cos(phases)
@@ -152,9 +153,10 @@ def actor_observations_from_components(data, level_limits, storage, previous_rel
         observations[:, i, 18] = system_storage
         observations[:, i, 19] = system_power
         observations[:, i, 20] = flood
+    observations = observations.astype(np.float32)
     if not np.isfinite(observations).all():
         raise FloatingPointError('Non-finite reservoir actor observations')
-    return observations.astype(np.float32)
+    return observations
 
 
 class CascadeReservoirEnv:
@@ -169,6 +171,7 @@ class CascadeReservoirEnv:
                     critic_state_layout=self.critic_state_layout, critic_state_size=self.state_size,
                     critic_input_layout='concatenated_actor_observations_WDD_BHT_XLD_XJB_THR',
                     feature_normalization=dict(
+                        flow_observation_scale=self.flow_observation_scale,
                         water_level='(level - operating_level_min) / operating_level_span',
                         total_inflow='actual available total inflow / release capacity',
                         forecast='issued next-7-day mean incremental inflow, training-year standardized',
@@ -189,6 +192,8 @@ class CascadeReservoirEnv:
     def __init__(self, data, config, start_year=None, action_bins=DEFAULT_ACTION_BINS,
                  episode_days=DEFAULT_EPISODE_DAYS):
         self.data = data
+        self.flow_observation_scale = validate_service_scale(
+            config.get('flow_observation_scale', 1.), 'flow_observation_scale')
         self.physics = ReservoirPhysics(data, config)
         self.use_daily_level_limits = config.get('use_daily_level_limits', True)
         if not isinstance(self.use_daily_level_limits, bool):
@@ -343,7 +348,7 @@ class CascadeReservoirEnv:
         return actor_observations_from_components(self.data, self.level_limits,
             self.storage[None], self.previous_release[None],
             self.previous_requested_action[None], self.previous_power[None], self.previous_turbine[None],
-            np.asarray([self.index], dtype=np.int64))[0]
+            np.asarray([self.index], dtype=np.int64), flow_observation_scale=self.flow_observation_scale)[0]
 
     def _observations(self):
         state = np.repeat(self.state()[None,:],5,axis=0)

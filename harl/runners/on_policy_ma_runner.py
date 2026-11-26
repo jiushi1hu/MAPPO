@@ -1,4 +1,5 @@
 """MAPPO updates on a common, frozen cascade rollout."""
+from harl.common.advantages import advantage_mode, all_row_advantages
 from harl.runners.on_policy_base_runner import OnPolicyBaseRunner
 
 
@@ -14,9 +15,8 @@ class OnPolicyMARunner(OnPolicyBaseRunner):
             advantages = self.critic_buffer.returns[:-1] - self.critic_buffer.value_preds[:-1]
         if advantages.shape[-1] != self.num_agents:
             raise ValueError('Expected one mixed return per actor')
-        if self.algo_args['algo'].get('normalize_shared_advantages', False):
-            advantages = ((advantages - advantages.mean(axis=(0, 1), keepdims=True)) /
-                          (advantages.std(axis=(0, 1), keepdims=True) + 1e-5))
+        if advantage_mode(self.algo_args['algo']) == 'all_rows':
+            advantages = all_row_advantages(advantages)
 
         own_advantages = [advantages[..., i:i+1].copy() for i in range(self.num_agents)]
         options = {'diagnostics': True} if getattr(self, 'diagnostics_enabled', False) else {}

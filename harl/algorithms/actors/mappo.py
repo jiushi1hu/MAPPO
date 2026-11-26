@@ -6,6 +6,7 @@ interfaces, individual mixed rewards and forced-action masks.
 import numpy as np
 import torch
 import torch.nn as nn
+from harl.common.advantages import active_row_advantages, advantage_mode
 from harl.utils.envs_tools import check
 from harl.utils.models_tools import get_grad_norm
 from harl.algorithms.actors.on_policy_base import OnPolicyBase
@@ -176,7 +177,7 @@ class MAPPO(OnPolicyBase):
             diagnostics: (bool) measure fixed-batch objective endpoints without
                 changing optimizer steps or random states.
             advantages_normalized: internal shared-batch flag; each reservoir's
-                own channel has already been normalized before concatenation.
+                own channel already has its configured preprocessing, including raw passthrough.
         Returns:
             train_info: (dict) contains information regarding training update (e.g. loss, grad norms, etc).
                 ratio is the mean sampled-action ratio on positive-objective
@@ -200,13 +201,8 @@ class MAPPO(OnPolicyBase):
                 train_info.update(self.surrogate_changes(zero, zero))
             return dict(train_info, **budget_info)
 
-        if (not advantages_normalized and
-                not self.args.get("normalize_shared_advantages", False)):
-            advantages_copy = advantages.copy()
-            advantages_copy[actor_buffer.active_masks[:-1] == 0.0] = np.nan
-            mean_advantages = np.nanmean(advantages_copy)
-            std_advantages = np.nanstd(advantages_copy)
-            advantages = (advantages - mean_advantages) / (std_advantages + 1e-5)
+        if not advantages_normalized and advantage_mode(self.args) == 'active_rows':
+            advantages = active_row_advantages(advantages, actor_buffer.active_masks[:-1])
 
         surrogate_before = (self.surrogate_metrics(actor_buffer, advantages)
                             if diagnostics else None)

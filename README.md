@@ -309,6 +309,19 @@ commands. Training rows leave synthetic effective probability/log-probability
 placeholders blank, while retaining genuine sampled-command likelihoods and
 policy entropy; exclude `forced_action=1` rows from controllable-action statistics.
 
+For a completed run with `training.jsonl` and its training trajectory CSVs,
+print forced visits and feasible release widths by seed and reservoir:
+
+```bash
+python -B -m analysis.training_control_authority runs/mappo_seed123_20261124_155924
+```
+
+Each forced visit includes its source date, episode, step, and the constraints
+matching the release endpoints. The width percentiles use m³/s. Relative widths
+use each reservoir's total outlet capacity. The ecological columns show the
+percentage of visits with an active requirement where all, some, or none of
+the action bins could meet it, given that day's executed upstream release.
+
 ```bash
 python -B examples/replay_cascade_checkpoint.py \
   --checkpoint runs/EXPERIMENT_seed1_checkpoints/update_000050.pt \

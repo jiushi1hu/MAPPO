@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
 from harl.envs.cascade_reservoir.episodes import episode_environment, positive_integer, training_windows
 from harl.envs.cascade_reservoir.periodic_evaluation import (
     PERIODIC_EVALUATION_DAYS, select_periodic_window)
@@ -303,14 +304,12 @@ def run_parallel_experiment(data, physical, config, args):
             any(not isinstance(key,str) or not isinstance(value,str) or not value
                 for key,value in data.hashes.items())):
         raise ValueError('Run configuration requires nonempty input data_hashes')
-    common_rows = config['algo'].get('normalize_shared_advantages', False)
     learning_objective=dict(
         advantage_source='individual_mixed',
         reward_formula='0.5 * own local reward + 0.5 * global generation reward',
         critic_reward_layout=CascadeMAPPORunner.critic_reward_layout,
         actor_value_channels=list(CascadeMAPPORunner.actor_value_channels),
-        normalization=('per_reservoir_over_common_rollout_rows' if common_rows
-                       else 'per_reservoir_over_controllable_rows'))
+        normalization=NORMALIZATION_LABELS[advantage_mode(config['algo'])])
     daily_limits=physical.get('use_daily_level_limits',True)
     raw_observation_dim=len(actor_observation_features(daily_limits))
     actor_architecture=dict(parameter_sharing=True,network_count=1,optimizer_count=1,

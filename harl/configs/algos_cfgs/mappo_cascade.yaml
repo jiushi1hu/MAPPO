@@ -43,7 +43,7 @@ algo:
   use_policy_active_masks: true
   action_aggregation: prod
   entropy_coef: 0.001
-  normalize_shared_advantages: true  # Normalize each reward channel over common rollout rows.
+  advantage_normalization: all_rows  # all_rows, active_rows, or none
 experiment:
   collection_mode: five_year_parallel
   evaluation_years: [1998, 1999, 1970, 1997, 2006]  # The other 55 source years are used for training.

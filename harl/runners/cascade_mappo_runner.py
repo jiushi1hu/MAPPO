@@ -6,6 +6,7 @@ import time
 import numpy as np
 import torch
 
+from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
 from harl.algorithms.actors.shared_mappo import make_shared_mappo_agents
 from harl.algorithms.critics.v_critic import VCritic, validate_value_normalization
 from harl.common.buffers.on_policy_actor_buffer import OnPolicyActorBuffer
@@ -184,9 +185,7 @@ class CascadeMAPPORunner(OnPolicyMARunner):
             advantage_source='individual_mixed',
             actor_reward_sources=['mixed_rewards[{}]'.format(i) for i in self.actor_value_channels],
             advantage_estimator='gae' if algo.get('use_gae', True) else 'discounted_return',
-            advantage_normalization=('per_reservoir_over_common_rollout_rows'
-                if algo.get('normalize_shared_advantages', False)
-                else 'per_reservoir_over_controllable_rows'),
+            advantage_normalization=NORMALIZATION_LABELS[advantage_mode(algo)],
             actor_reward_definition=ACTOR_REWARD_DEFINITION,
             mixed_reward_definition=ACTOR_REWARD_DEFINITION,
             actor_advantages='own mixed-return advantage per reservoir; one value output per channel')
