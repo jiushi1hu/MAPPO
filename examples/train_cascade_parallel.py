@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
+from harl.common.advantages import SYSTEM_NORMALIZATION_LABELS, advantage_mode
 from harl.envs.cascade_reservoir.episodes import episode_environment, positive_integer, training_windows
 from harl.envs.cascade_reservoir.periodic_evaluation import (
     PERIODIC_EVALUATION_DAYS, select_periodic_window)
@@ -305,16 +305,16 @@ def run_parallel_experiment(data, physical, config, args):
                 for key,value in data.hashes.items())):
         raise ValueError('Run configuration requires nonempty input data_hashes')
     learning_objective=dict(
-        advantage_source='individual_mixed',
-        reward_formula='0.5 * own local reward + 0.5 * global generation reward',
+        advantage_source='common_system',
+        reward_formula='0.5 * sum(local rewards) + 0.5 * global generation reward',
         critic_reward_layout=CascadeMAPPORunner.critic_reward_layout,
         actor_value_channels=list(CascadeMAPPORunner.actor_value_channels),
-        normalization=NORMALIZATION_LABELS[advantage_mode(config['algo'])])
+        normalization=SYSTEM_NORMALIZATION_LABELS[advantage_mode(config['algo'])])
     daily_limits=physical.get('use_daily_level_limits',True)
     raw_observation_dim=len(actor_observation_features(daily_limits))
     actor_architecture=dict(parameter_sharing=True,network_count=1,optimizer_count=1,
         raw_observation_dim=raw_observation_dim,network_observation_dim=raw_observation_dim,
-        identity_features='none',critic_output_dim=len(CascadeMAPPORunner.actor_value_channels),
+        identity_features='none',critic_output_dim=CascadeMAPPORunner.critic_output_dim,
         actor_observation_layout=ACTOR_OBSERVATION_LAYOUT,
         critic_state_layout=CRITIC_STATE_LAYOUT,
         critic_state_size=critic_state_size(daily_limits))
@@ -336,8 +336,8 @@ def run_parallel_experiment(data, physical, config, args):
             local_reward='own power / installed capacity - own weighted relative ecological-flow deficit; '
                 'ecological-flow costs are disabled when reward penalties are disabled',
             system_reward='0.5 * sum(local rewards) + 0.5 * global generation reward',
-            critic='one centralized network with five mixed-return outputs',
-            actor_advantages='own mixed-return advantage and value output per reservoir',
+            critic='one centralized network with one system-return output',
+            actor_advantages='one shared system-return advantage',
             advantage_normalization=learning_objective['normalization'],
             actor_temporal_weighting='uniform_rollout_rows',
             actor_objective_reduction='mean over all rollout rows; policy active masks zero forced rows',
@@ -346,7 +346,7 @@ def run_parallel_experiment(data, physical, config, args):
             legacy_metrics='existing reward and compact CSV metrics retain legacy team-reward definitions; '
                 'return plots follow the declared learning objective',
             update_interpretation='one shared actor trained on pooled reservoir samples '
-                'using clipped PPO surrogates and individual mixed-return advantages'),
+                'using clipped PPO surrogates and common system-return advantages'),
         episode_horizon_days=days,parallel_environments=count,collector_backend='spawn worker processes',
         episodes_per_seed=episodes,updates_per_seed=episodes//count,
         collector_steps_per_update=days*count,collector_steps_per_seed=days*episodes,

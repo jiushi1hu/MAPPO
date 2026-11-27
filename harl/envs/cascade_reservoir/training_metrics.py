@@ -44,7 +44,7 @@ def step_record(transition, *, seed, episode, episode_step, phase, training_step
     """Key team metrics for one executed day, without a physical trajectory.
 
     Reward and weighted penalty components retain the legacy undiscounted team
-    metric. MAPPO learns from the per-reservoir mixed rewards.
+    metric. MAPPO learns from the scalar system reward.
     Both are recorded separately in episode summaries. Generation and physical shortfalls are sums
     across the five reservoirs. An unavailable service measurement is None;
     a measured zero shortfall remains zero, even with reward penalties disabled.

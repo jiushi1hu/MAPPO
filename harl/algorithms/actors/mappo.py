@@ -1,7 +1,7 @@
 """MAPPO for the cascade scheduling task.
 
 The PPO loss follows HARL MAPPO, adapted to this repository's feed-forward
-interfaces, individual mixed rewards and forced-action masks.
+interfaces, rollout advantages and forced-action masks.
 """
 import numpy as np
 import torch
@@ -151,10 +151,10 @@ class MAPPO(OnPolicyBase):
         return policy_loss, dist_entropy, actor_grad_norm, imp_weights
 
     def share_param_train(self, actor_buffers, own_advantages, num_agents, state_type,
-                          diagnostics=False):
+                          diagnostics=False, advantages_normalized=False):
         """Update one shared policy on a joint batch of agent-specific targets.
 
-        The five physical buffers remain unchanged. Their own mixed-return
+        The five physical buffers remain unchanged. Their rollout
         advantages, masks and old probabilities retain the same row alignment
         after the raw observation lanes are concatenated. There is one
         optimizer step per joint minibatch and epoch.
@@ -163,7 +163,7 @@ class MAPPO(OnPolicyBase):
         if state_type != 'EP':
             raise ValueError('Cascade MAPPO requires a centralized EP critic state')
         buffer, advantages = joint_shared_actor_batch(
-            self, actor_buffers, own_advantages, num_agents)
+            self, actor_buffers, own_advantages, num_agents, advantages_normalized=advantages_normalized)
         return self.train(buffer, advantages, state_type, diagnostics=diagnostics,
                           advantages_normalized=True)
 
@@ -176,8 +176,7 @@ class MAPPO(OnPolicyBase):
             state_type: (str) type of state.
             diagnostics: (bool) measure fixed-batch objective endpoints without
                 changing optimizer steps or random states.
-            advantages_normalized: internal shared-batch flag; each reservoir's
-                own channel already has its configured preprocessing, including raw passthrough.
+            advantages_normalized: true when the caller already applied the configured advantage preprocessing.
         Returns:
             train_info: (dict) contains information regarding training update (e.g. loss, grad norms, etc).
                 ratio is the mean sampled-action ratio on positive-objective

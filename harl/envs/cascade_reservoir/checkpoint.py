@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
+from harl.common.advantages import NORMALIZATION_LABELS, SYSTEM_NORMALIZATION_LABELS, advantage_mode
 from harl.common.valuenorm import ValueNorm
 from harl.envs.cascade_reservoir.data_loader import CascadeData, IDS
 from harl.envs.cascade_reservoir.episodes import episode_environment, positive_integer
@@ -132,13 +132,15 @@ def _critic_layout(metadata):
             any(isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer))
                 for value in channels)):
         raise ValueError('Checkpoint actor value channels must identify five integer heads')
-    if layout == 'mixed_by_reservoir':
+    if layout == 'system_reward':
+        expected_dimension = 1
+    elif layout == 'mixed_by_reservoir':
         expected_dimension = len(IDS)
     elif layout == 'mixed_by_reservoir_then_legacy_team':
         expected_dimension = len(IDS)+1
     else:
         raise ValueError('Unsupported checkpoint critic reward layout')
-    expected_channels = tuple(range(len(IDS)))
+    expected_channels = (0,)*len(IDS) if layout == 'system_reward' else tuple(range(len(IDS)))
     if dimension != expected_dimension or tuple(channels) != expected_channels:
         raise ValueError('Checkpoint critic reward layout, dimensions and actor channels disagree')
     return layout, expected_channels, expected_dimension
@@ -230,8 +232,8 @@ def save_checkpoint(runner, path):
                         actor_identity_features='none',
                         actor_observation_dim=raw_dim, raw_actor_observation_dim=raw_dim)
     metadata['actor_advantage_estimator'] = (
-        'per_reservoir_mixed_gae' if runner.algo_args['algo'].get('use_gae', True)
-        else 'per_reservoir_mixed_discounted_return')
+        'common_system_gae' if runner.algo_args['algo'].get('use_gae', True)
+        else 'common_system_discounted_return')
     payload = dict(format=CHECKPOINT_FORMAT, version=CHECKPOINT_VERSION,
         metadata=metadata, metadata_sha256=_digest(metadata), actors=actor_states,
         critic=critic_state, value_normalizer=normalizer_state)
@@ -297,11 +299,12 @@ def load_checkpoint(path, data_root=None):
         if not isinstance(shared_actor, bool):
             raise ValueError('Checkpoint actor parameter sharing must be a boolean')
         args = settings['algorithm']
-        expected_estimator = ('per_reservoir_mixed_gae' if args['algo'].get('use_gae', True)
-                              else 'per_reservoir_mixed_discounted_return')
-        if (metadata.get('critic_reward_layout') == 'mixed_by_reservoir' and
-                metadata.get('actor_advantage_estimator') != expected_estimator):
-            raise ValueError('Checkpoint MAPPO mixed-return metadata is incomplete')
+        layout = metadata.get('critic_reward_layout')
+        if layout in ('system_reward', 'mixed_by_reservoir'):
+            source = 'common_system' if layout == 'system_reward' else 'per_reservoir_mixed'
+            estimator = 'gae' if args['algo'].get('use_gae', True) else 'discounted_return'
+            if metadata.get('actor_advantage_estimator') != f'{source}_{estimator}':
+                raise ValueError('Checkpoint advantage estimator disagrees with critic layout')
         configured_sharing = args['algo'].get('share_param', False)
         if not isinstance(configured_sharing, bool) or configured_sharing != shared_actor:
             raise ValueError('Checkpoint actor-sharing architecture disagrees with its settings')
@@ -465,6 +468,8 @@ class FrozenCascadePolicy:
         rows, rewards, value_history, next_value_history = [], [], [], []
         mixed_rewards, team_rewards, legacy_rewards = [], [], []
         energy, spill, residual = 0., 0., 0.
+        system_value = self.critic_reward_layout == 'system_reward'
+        legacy_value = self.critic_reward_layout == 'mixed_by_reservoir_then_legacy_team'
         cumulative_deficit = np.zeros(len(IDS))
         energy_by, spill_by = np.zeros(5), np.zeros(5)
         for step in range(1, days+1):
@@ -491,9 +496,12 @@ class FrozenCascadePolicy:
             energy_by += transition['energy']
             spill_by += transition['spill']*env.physics.dt
             residual = max(residual, float(np.abs(transition['residual']).max()))
-            mixed = self.critic_reward_layout == 'mixed_by_reservoir'
-            rewards.append(np.asarray(transition['mixed_rewards']).copy() if mixed else
-                           np.r_[transition['mixed_rewards'], transition['reward']])
+            if system_value:
+                rewards.append(np.array([transition['system_reward']]))
+            elif legacy_value:
+                rewards.append(np.r_[transition['mixed_rewards'], transition['reward']])
+            else:
+                rewards.append(np.asarray(transition['mixed_rewards']).copy())
             value_history.append(values)
             next_value_history.append(next_values)
             mixed_rewards.append(np.asarray(transition['mixed_rewards']).copy())
@@ -524,12 +532,12 @@ class FrozenCascadePolicy:
                     mixed_reward=float(transition['mixed_rewards'][i]), system_reward=float(transition['system_reward']),
                     legacy_team_reward=float(transition['reward']),
                     critic_reward_layout=self.critic_reward_layout, value_channel=channel,
-                    value_basis='own_mixed_reward',
+                    value_basis='system_return' if system_value else 'own_mixed_reward',
                     learning_reward=float(learning_reward), value=float(values[channel]),
                     next_value=float(next_values[channel]), td_residual=td,
                     realized_learning_reward_to_go=0., replay_gae_target=0., replay_gae_advantage=0.,
                     realized_system_reward_to_go=0.,
-                    legacy_team_value=None if mixed else float(values[-1]),
+                    legacy_team_value=float(values[-1]) if legacy_value else None,
                     realized_mixed_reward_to_go=0.,
                     realized_legacy_team_reward_to_go=0.,
                     ecological_flow_shortfall_m3s=None if shortfalls is None else float(shortfalls['ecological_flow'][i]),
@@ -589,8 +597,11 @@ class FrozenCascadePolicy:
         totals.update(episode_constraint_status(completed=True, physical_feasible=True,
             service_shortfalls=totals['service_shortfalls']))
         totals['mixed_reward_definition'] = totals['actor_reward_definition']
-        totals['advantage_source'] = 'individual_mixed'
-        totals['advantage_normalization'] = NORMALIZATION_LABELS[
+        if system_value:
+            totals['actor_reward_definition'] = totals['system_reward_definition']
+        totals['advantage_source'] = 'common_system' if system_value else 'individual_mixed'
+        labels = SYSTEM_NORMALIZATION_LABELS if system_value else NORMALIZATION_LABELS
+        totals['advantage_normalization'] = labels[
             advantage_mode(self.metadata['settings']['algorithm']['algo'])]
         return dict(status='ok', phase=phase, seed=self.metadata['seed'],
             policy_update=self.metadata['policy_update'], policy_episode=self.metadata['policy_episode'],

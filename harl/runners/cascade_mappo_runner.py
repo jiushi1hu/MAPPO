@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from harl.models.base.distributions import ACTION_HEADS
-from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
+from harl.common.advantages import SYSTEM_NORMALIZATION_LABELS, advantage_mode
 from harl.algorithms.actors.shared_mappo import make_shared_mappo_agents
 from harl.algorithms.critics.v_critic import VCritic, validate_value_normalization
 from harl.common.buffers.on_policy_actor_buffer import OnPolicyActorBuffer
@@ -21,7 +21,7 @@ from harl.envs.cascade_reservoir.periodic_evaluation import (
 from harl.envs.cascade_reservoir.reservoir_physics import InfeasibleCascade
 from harl.envs.cascade_reservoir.level_ramp import conflicts_from_exception
 from harl.envs.cascade_reservoir.reward import (
-    ACTOR_REWARD_DEFINITION, EpisodeRewardMetrics,
+    ACTOR_REWARD_DEFINITION, SYSTEM_REWARD_DEFINITION, EpisodeRewardMetrics,
     reward_settings, validate_discount_factor)
 from harl.envs.cascade_reservoir.training_metrics import log_episode, log_step, step_record
 from harl.envs.cascade_reservoir.training_sampler import TrainingWindowSampler, validate_sampling_mode
@@ -61,8 +61,9 @@ class CascadeMAPPORunner(OnPolicyMARunner):
     """One shared actor and one centralized critic with five value heads."""
 
     algorithm_name = 'mappo'
-    critic_reward_layout = 'mixed_by_reservoir'
-    actor_value_channels = (0, 1, 2, 3, 4)
+    critic_reward_layout = 'system_reward'
+    critic_output_dim = 1
+    actor_value_channels = (0,) * 5
 
     def __init__(self, data, physical_config, algo_args, seed, episode_log=None, step_log=None,
                  periodic_window=None, training_sampler=None,
@@ -112,7 +113,6 @@ class CascadeMAPPORunner(OnPolicyMARunner):
         random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
         torch.use_deterministic_algorithms(True)
         self.reward_settings = reward_settings(physical_config)
-        self.critic_output_dim = self.num_agents
         self.value_normalizer = ValueNorm(self.critic_output_dim, device=self.device) if args['train']['use_valuenorm'] else None
         self.envs = [episode_environment(data, physical_config,
             self.windows[self.training_window_starts[0]], self.length, self.action_bins)]
@@ -166,10 +166,10 @@ class CascadeMAPPORunner(OnPolicyMARunner):
     def _progress_return(self, record=None):
         """Display the actual learning objective rather than legacy accounting."""
         if record is None:
-            rewards = [row['learning_rewards']['episode_mixed_rewards']
+            rewards = [row['learning_rewards']['episode_system_reward']
                        for row in self.episode_history[-self.n_envs:]]
             return float(np.mean(rewards)) if rewards else None
-        values = record.get('mixed_evaluator_returns', record.get('episode_mixed_rewards'))
+        values = record.get('system_evaluator_return', record.get('episode_system_reward'))
         return None if values is None else float(np.mean(values))
 
     @staticmethod
@@ -183,13 +183,13 @@ class CascadeMAPPORunner(OnPolicyMARunner):
         return dict(algorithm=self.algorithm_name,
             critic_reward_layout=self.critic_reward_layout,
             actor_value_channels=list(self.actor_value_channels),
-            advantage_source='individual_mixed',
-            actor_reward_sources=['mixed_rewards[{}]'.format(i) for i in self.actor_value_channels],
+            advantage_source='common_system',
+            actor_reward_sources=['system_reward'] * self.num_agents,
             advantage_estimator='gae' if algo.get('use_gae', True) else 'discounted_return',
-            advantage_normalization=NORMALIZATION_LABELS[advantage_mode(algo)],
-            actor_reward_definition=ACTOR_REWARD_DEFINITION,
+            advantage_normalization=SYSTEM_NORMALIZATION_LABELS[advantage_mode(algo)],
+            actor_reward_definition=SYSTEM_REWARD_DEFINITION,
             mixed_reward_definition=ACTOR_REWARD_DEFINITION,
-            actor_advantages='own mixed-return advantage per reservoir; one value output per channel')
+            actor_advantages='common system-return advantage for all reservoirs')
 
     def _annotate_learning_rewards(self, record):
         """Add provenance to one runtime record and its learning/window summaries."""
@@ -300,7 +300,7 @@ class CascadeMAPPORunner(OnPolicyMARunner):
                     b.insert(obs[:, i], effective_actions[:, i:i+1], lp, next_masks,
                              np.ones((self.n_envs, 1), dtype=np.float32))
                     b.active_masks[t] = controls[:, i:i+1]
-                rewards = np.asarray([row['mixed_rewards'] for row in transitions], dtype=np.float32)
+                rewards = np.asarray([[row['system_reward']] for row in transitions], dtype=np.float32)
                 cb.insert(state, _t2n(values), rewards, next_masks, np.ones_like(next_masks))
                 forced += int((controls == 0).sum())
                 largest_residual = max(largest_residual,

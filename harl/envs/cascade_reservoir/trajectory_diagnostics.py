@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from harl.common.advantages import active_row_advantages, advantage_mode, all_row_advantages
+from harl.common.advantages import advantage_mode, system_advantages
 from harl.envs.cascade_reservoir.data_loader import IDS
 from harl.envs.cascade_reservoir.dispatch_kernel import release_from_normalized_action
 from harl.envs.cascade_reservoir.learning_signal import critic_reward_spec
@@ -176,7 +176,7 @@ class TrajectoryDiagnosticsWriter:
     Effective probabilities on forced rows are left blank, excluding synthetic
     ``exp(0)=1`` buffer placeholders. Actual sampled-command likelihoods and
     policy entropy remain available; their objective weight is zero.
-    Each actor row has uniform temporal weight and its reservoir's mixed-return
+    Each actor row has uniform temporal weight and the common system-return
     value and advantage.
     """
 
@@ -278,7 +278,7 @@ class TrajectoryDiagnosticsWriter:
         cb = runner.critic_buffer
         shape = cb.rewards.shape
         days, lanes, channels = shape
-        if (channels != len(IDS) or days != len(self._transitions) or
+        if (channels != 1 or days != len(self._transitions) or
                 lanes != len(self._batch['episode_ids']) or len(runner.actor_buffer) != len(IDS) or
                 len(runner.actor) != len(IDS)):
             raise ValueError('Trajectory captures must match a complete five-reservoir rollout')
@@ -295,7 +295,7 @@ class TrajectoryDiagnosticsWriter:
             raise ValueError('gamma must be between zero and one')
         raw = frozen['gae_targets']-frozen['prediction']
         mode = advantage_mode(runner.algo_args['algo'])
-        prepared = all_row_advantages(raw) if mode == 'all_rows' else raw
+        prepared = system_advantages(raw, mode, runner.actor_buffer)
         if len(before['distributions']) != len(IDS):
             raise ValueError('One frozen collection distribution per reservoir is required')
         actors = []
@@ -307,8 +307,6 @@ class TrajectoryDiagnosticsWriter:
             channel = spec['actor_channels'][i]
             advantage = raw[..., channel:channel+1]
             normalized = prepared[..., channel:channel+1]
-            if mode == 'active_rows':
-                normalized = active_row_advantages(advantage, active)
             # Keep the existing CSV column, with uniform temporal weight for
             # every row. Gamma is used below only in the frozen TD residual.
             time = np.ones((days, lanes, 1), dtype=np.float32)
@@ -345,10 +343,10 @@ class TrajectoryDiagnosticsWriter:
         thresholds = (None if requirements is None else
                       _array(requirements.ecological_flow_m3s, (len(IDS),), 'ecological thresholds'))
         spec = critic_reward_spec(runner, rewards.shape[-1])
-        captured = np.asarray([[row['mixed_rewards'] for row in transitions]
+        captured = np.asarray([[[row['system_reward']] for row in transitions]
                                for transitions in self._transitions], dtype=np.float32)
         if not np.array_equal(rewards.astype(np.float32), captured):
-            raise ValueError('Learning rewards disagree with the captured mixed rewards')
+            raise ValueError('Learning rewards disagree with the captured system rewards')
         windows = {name:{reservoir:_Summary() for reservoir in IDS}
                    for name in ('all_days', 'first_14_days', 'october_may')}
         batch = self._batch
@@ -423,7 +421,7 @@ class TrajectoryDiagnosticsWriter:
                         windows['october_may'][reservoir].update(row, transition['timestep_seconds'])
         self.stream.flush()
         self.rows_written += count
-        summary = dict(schema='cascade_trajectory_v4', file=str(self.path.resolve()), rows=count,
+        summary = dict(schema='cascade_trajectory_v5', file=str(self.path.resolve()), rows=count,
             collection_policy_update=collection_update, optimization_update=batch['update'],
             total_rows_written=self.rows_written, episode_horizon_days=len(self._transitions),
             parallel_environments=len(batch['episode_ids']), gamma=gamma,
@@ -438,7 +436,7 @@ class TrajectoryDiagnosticsWriter:
             normalized_advantage_column='Actor input after configured preprocessing; raw in none mode',
             policy_objective_weight='policy active mask only',
             value_source='before_update snapshot in reward units before optimization and ValueNorm changes',
-            own_column_interpretation='reservoir-specific mixed reward and value',
+            own_column_interpretation='shared system reward and value repeated for each reservoir',
             probability_source='collection_before_update; forced effective probability/log-probability are blank; '
                                'sampled probabilities and entropy are real policy measurements',
             ecological_action_scope='realized same-day bounds conditional on current upstream releases; '

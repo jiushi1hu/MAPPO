@@ -36,6 +36,8 @@ def learning_return_kind(payload):
     if not isinstance(objective, dict):
         raise ValueError('learning_objective must be a mapping')
     layout = objective.get('critic_reward_layout', payload.get('critic_reward_layout'))
+    if layout == 'system_reward':
+        return 'common_system'
     if layout in ('mixed_by_reservoir', 'mixed_by_reservoir_then_legacy_team'):
         return 'individual_mixed'
     source = objective.get('advantage_source')
@@ -47,7 +49,7 @@ def learning_return_kind(payload):
 
 
 def learning_return_label(payload):
-    return {'individual_mixed': 'Mean individual mixed learning return',
+    return {'common_system': 'System learning return', 'individual_mixed': 'Mean individual mixed learning return',
             'legacy_team': 'Legacy-team return (learning objective unavailable)'}[learning_return_kind(payload)]
 
 
@@ -79,6 +81,8 @@ def learning_return_value(payload, row, phase):
     kind = learning_return_kind(payload)
     if kind == 'legacy_team':
         field = 'episode_reward' if phase == 'training' else 'evaluator_return'
+    elif kind == 'common_system':
+        field = 'episode_system_reward' if phase == 'training' else 'system_evaluator_return'
     else:
         field = 'episode_mixed_rewards' if phase == 'training' else 'mixed_evaluator_returns'
         if field in row:

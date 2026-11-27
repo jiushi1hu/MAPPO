@@ -133,7 +133,7 @@ def make_shared_mappo_agents(args, obs_spaces, act_spaces, device=torch.device('
     return [SharedMAPPOAgent(core, i, num_agents) for i in range(num_agents)]
 
 
-def joint_shared_actor_batch(core, buffers, own_advantages, num_agents):
+def joint_shared_actor_batch(core, buffers, own_advantages, num_agents, *, advantages_normalized=False):
     """Join reservoir lanes without changing their physical buffers or targets."""
     _, num_agents = _identity(0, num_agents)
     if (len(buffers) != num_agents or not isinstance(own_advantages, (list, tuple))
@@ -151,7 +151,7 @@ def joint_shared_actor_batch(core, buffers, own_advantages, num_agents):
         advantages = np.asarray(advantages, dtype=np.float32).copy()
         if advantages.shape != (days, lanes, 1) or not np.isfinite(advantages).all():
             raise ValueError('Shared MAPPO requires finite, aligned own advantage arrays')
-        if advantage_mode(core.args) == 'active_rows':
+        if not advantages_normalized and advantage_mode(core.args) == 'active_rows':
             advantages = active_row_advantages(advantages, buffer.active_masks[:-1])
         normalized.append(advantages)
 

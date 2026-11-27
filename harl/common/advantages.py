@@ -30,3 +30,22 @@ def active_row_advantages(raw, mask):
     if not selected.size:
         return np.zeros_like(raw)
     return (raw - selected.mean()) / (selected.std() + 1e-5)
+
+
+SYSTEM_NORMALIZATION_LABELS = {
+    'all_rows': 'system_over_all_rollout_rows',
+    'active_rows': 'system_over_any_controllable_reservoir_rows',
+    'none': 'none',
+}
+
+
+def system_advantages(raw, mode, buffers):
+    """Prepare one scalar advantage per transition before pooling actor lanes."""
+    if raw.ndim != 3 or raw.shape[-1] != 1:
+        raise ValueError('Expected scalar system advantages with shape (days, lanes, 1)')
+    if mode == 'all_rows':
+        return all_row_advantages(raw)
+    if mode == 'active_rows':
+        active = np.logical_or.reduce([b.active_masks[:-1] > 0 for b in buffers])
+        return active_row_advantages(raw, active)
+    return raw

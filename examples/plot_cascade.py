@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from examples import plot_cascade_parallel as legacy
-from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
+from harl.common.advantages import NORMALIZATION_LABELS, SYSTEM_NORMALIZATION_LABELS, advantage_mode
 
 
 COLOR = '#2563eb'
@@ -182,7 +182,7 @@ def _validate_architecture(run):
             raise ValueError('learning_objective must be a mapping')
         layout = objective.get('critic_reward_layout')
         legacy_layout = layout == 'mixed_by_reservoir_then_legacy_team'
-        if layout not in ('mixed_by_reservoir', 'mixed_by_reservoir_then_legacy_team'):
+        if layout not in ('system_reward', 'mixed_by_reservoir', 'mixed_by_reservoir_then_legacy_team'):
             raise ValueError('Unsupported MAPPO learning reward layout')
         normalization = NORMALIZATION_LABELS[advantage_mode(
             settings.get('algo', {}), legacy_all_rows=not legacy_layout)]
@@ -190,12 +190,17 @@ def _validate_architecture(run):
             reward_formula='0.5 * own local reward + 0.5 * global generation reward',
             critic_reward_layout=layout, actor_value_channels=list(range(5)),
             normalization=normalization)
+        if layout == 'system_reward':
+            expected_objective.update(advantage_source='common_system',
+                reward_formula='0.5 * sum(local rewards) + 0.5 * global generation reward',
+                actor_value_channels=[0]*5,
+                normalization=SYSTEM_NORMALIZATION_LABELS[advantage_mode(settings['algo'])])
         if objective != expected_objective:
             raise ValueError('Learning objective does not match the algorithm reward/value layout')
         if objective.get('critic_reward_layout') == 'mixed_by_reservoir_then_legacy_team':
             critic_dim = 6  # Historical runs used five mixed values plus a legacy head.
         else:
-            critic_dim = 5
+            critic_dim = 1 if layout == 'system_reward' else 5
     if architecture is None:  # Historical MAPPO used five independent actors.
         return
     if not isinstance(architecture, dict):

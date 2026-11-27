@@ -66,7 +66,7 @@ def summarise_mode(rows):
     for row in updates:
         by_seed.setdefault(int(row['seed']), []).append(row.get('episode_reward_mean'))
 
-    # Use the mean of the five mixed returns for the MAPPO learning curve.
+    # Respect the learning objective recorded by the run.
     episodes_by_seed = {}
     for row in episodes:
         episodes_by_seed.setdefault(int(row['seed']), []).append(row)
@@ -77,8 +77,9 @@ def summarise_mode(rows):
             (int(row['update'])-1)*row.get('parallel_envs', 1):
             int(row['update'])*row.get('parallel_envs', 1)]
         learning_curve.append(dict(update=int(row['update']), seed=seed,
-            learning_return=_mean([value for item in window
-                for value in item['learning_rewards']['episode_mixed_rewards']]),
+            learning_return=_mean([item['learning_rewards']['episode_system_reward']
+                if item.get('critic_reward_layout') == 'system_reward' else
+                _mean(item['learning_rewards']['episode_mixed_rewards']) for item in window]),
             generation_TWh=row.get('episode_generation_TWh_mean')))
     learning_by_seed = {}
     for row in learning_curve:

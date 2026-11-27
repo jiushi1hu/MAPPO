@@ -52,7 +52,7 @@ def main(argv=None):
     parser.add_argument('--gamma',type=float,help='Discount factor in [0,1]; 1 gives undiscounted episode return')
     parser.add_argument('--gae-lambda',type=float,help='GAE trace parameter in [0,1]')
     parser.add_argument('--advantage-normalization', choices=tuple(NORMALIZATION_LABELS),
-                        help='Rows used to standardize each Actor advantage channel (default: all_rows)')
+                        help='Rows used to standardize the common system advantage (default: all_rows)')
     parser.add_argument('--ppo-epochs',type=int,help='Actor optimization epochs per collection round')
     parser.add_argument('--head-model',choices=HEAD_MODELS)
     parser.add_argument('--feasibility-mode',choices=FEASIBILITY_MODES,

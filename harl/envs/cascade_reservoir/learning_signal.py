@@ -1,17 +1,17 @@
 """Training-only learning-signal measurements on complete multi-year episodes."""
 import numpy as np
-from harl.common.advantages import active_row_advantages, advantage_mode, all_row_advantages
+from harl.common.advantages import advantage_mode, system_advantages
 
 
 def critic_reward_spec(runner, channels):
-    """Describe the reservoir-specific mixed-return value heads."""
-    mapping = tuple(range(runner.num_agents))
-    if channels != len(mapping) or tuple(runner.actor_value_channels) != mapping:
-        raise ValueError('Expected one mixed-return value channel per reservoir')
+    """Describe the shared system value used by every actor row."""
+    mapping = (0,) * runner.num_agents
+    if channels != 1 or tuple(runner.actor_value_channels) != mapping:
+        raise ValueError('Expected one shared system-return value channel')
     return dict(layout=runner.critic_reward_layout, actor_channels=mapping,
-        actor_reward_sources=tuple('mixed_rewards[{}]'.format(i) for i in mapping),
-        actor_value_bases=('own_mixed_return',)*channels,
-        fit_channel=0, fitted_reward_basis='mixed_reward', legacy_value_available=False)
+        actor_reward_sources=('system_reward',)*runner.num_agents,
+        actor_value_bases=('system_return',)*runner.num_agents,
+        fit_channel=0, fitted_reward_basis='system_reward', legacy_value_available=False)
 
 
 def signal_statistics(values):
@@ -52,7 +52,7 @@ def learning_signal_report(runner, before, post_prediction):
     cb = runner.critic_buffer
     shape = cb.rewards.shape
     if (len(shape) != 3 or shape[0] < 1 or shape[1] < 1 or
-            shape[2] != runner.num_agents):
+            shape[2] != 1):
         raise ValueError('Learning-signal diagnostics require complete cascade trajectories')
     spec = critic_reward_spec(runner, shape[2])
     signals = (before['mc'], before['prediction'], before['gae_targets'], post_prediction)
@@ -85,7 +85,7 @@ def learning_signal_report(runner, before, post_prediction):
     raw_advantage = targets-old_prediction
     mc_advantage = mc-old_prediction
     mode = advantage_mode(runner.algo_args['algo'])
-    prepared = all_row_advantages(raw_advantage) if mode == 'all_rows' else raw_advantage
+    prepared = system_advantages(raw_advantage, mode, runner.actor_buffer)
     actors = []
     for i, (actor, buffer) in enumerate(zip(runner.actor, runner.actor_buffer)):
         active = buffer.active_masks[:-1] > 0.
@@ -109,8 +109,6 @@ def learning_signal_report(runner, before, post_prediction):
         actor_raw = raw_advantage[..., own]
         actor_mc_advantage = mc_advantage[..., own]
         training_advantage = prepared[..., own]
-        if mode == 'active_rows':
-            training_advantage = active_row_advantages(actor_raw, active)
         comparison = _advantage_comparison(actor_raw[objective], actor_mc_advantage[objective])
         weight_sum = float(weights[objective].sum(dtype=np.float64))
         actors.append(dict(agent=i, value_channel=channel,
@@ -124,7 +122,7 @@ def learning_signal_report(runner, before, post_prediction):
             critic_mc_pre=_fit(mc[..., own], old_prediction[..., own]),
             critic_mc_post=_fit(mc[..., own], post_prediction[..., own]),
             controllable_rows=int(active.sum()), objective_rows=int(objective.sum()),
-            normalization_scope={'all_rows': 'own_channel_common_rows', 'active_rows': 'actor_controllable_rows',
+            normalization_scope={'all_rows': 'common_rollout_rows', 'active_rows': 'any_controllable_reservoir_rows',
                                  'none': 'none'}[mode],
             actor_advantage_estimator='gae' if cb.use_gae else 'discounted_return',
             raw_advantage=comparison['gae'], training_advantage=signal_statistics(training_advantage[objective]),
