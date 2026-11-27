@@ -32,6 +32,7 @@ class StochasticPolicy(nn.Module):
             self.hidden_sizes[-1],
             self.initialization_method,
             self.gain,
+            args.get("action_distribution", "categorical"),
         )
 
         self.to(device)

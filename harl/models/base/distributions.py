@@ -40,3 +40,30 @@ class Categorical(nn.Module):
         if available_actions is not None:
             x[available_actions == 0] = -1e10
         return FixedCategorical(logits=x)
+
+
+class OrderedGaussian(nn.Module):
+    """Categorical probabilities from a learned center and width in bin units."""
+
+    def __init__(self, num_inputs, num_outputs, initialization_method, gain):
+        super().__init__()
+        if num_outputs < 2:
+            raise ValueError("Ordered discrete control requires at least two bins")
+        self.last_bin = num_outputs - 1
+        self.parameters_head = init(nn.Linear(num_inputs, 2), get_init_method(initialization_method),
+                                    lambda bias: nn.init.constant_(bias, 0), gain)
+        self.register_buffer("bins", torch.arange(num_outputs, dtype=torch.float32), persistent=False)
+
+    def forward(self, x, available_actions=None):
+        center_fraction, width_fraction = self.parameters_head(x).sigmoid().split(1, dim=-1)
+        mu = self.last_bin * center_fraction
+        sigma = 0.5 + 0.5 * self.last_bin * width_fraction
+        logits = -0.5 * ((self.bins - mu) / sigma).square()
+        if available_actions is not None:
+            if not (available_actions != 0).any(dim=-1).all():
+                raise ValueError("Each observation must have an available action")
+            logits = logits.masked_fill(available_actions == 0, -torch.inf)
+        return FixedCategorical(logits=logits)
+
+
+ACTION_HEADS = {"categorical": Categorical, "ordered_gaussian": OrderedGaussian}

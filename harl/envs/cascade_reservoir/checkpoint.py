@@ -36,6 +36,8 @@ CHECKPOINT_VERSION = 3
 REPLAY_TRACE_FIELDS = (
     'phase', 'seed', 'policy_update', 'episode_step', 'date', 'reservoir',
     'policy_action_index', 'command_action_index', 'effective_action_index',
+    'command_delta_bins', 'release_delta_m3s', 'storage_change_m3',
+    'cumulative_ecological_deficit_m3',
     'action_overridden', 'controllable', 'normalized_action', 'mapping_fraction',
     'policy_action_probability', 'command_probability', 'command_log_probability', 'entropy',
     'probability_source', 'action_selection', *ECOLOGICAL_ACTION_DIAGNOSTIC_FIELDS,
@@ -142,6 +144,36 @@ def _critic_layout(metadata):
     return layout, expected_channels, expected_dimension
 
 
+def _save_exclusive(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with path.open('xb') as stream:
+            created = True
+            torch.save(payload, stream)
+    except FileExistsError:
+        raise
+    except BaseException:
+        # Only remove this invocation's incomplete, exclusively-created output.
+        if created:
+            path.unlink()
+        raise
+
+
+def save_round_actor(runner):
+    """Save the shared cascade actor evaluated at this round."""
+    path = runner.checkpoint_dir / 'actors' / f'round_{runner.update_count:06d}.pt'
+    actor = runner.actor[0].actor
+    if any(agent.actor is not actor for agent in runner.actor):
+        raise ValueError('Round actor capture expects a shared cascade actor')
+    metadata = dict(format='cascade_round_actor_v1', seed=int(runner.seed),
+                    policy_update=int(runner.update_count), training_steps=int(runner.training_steps),
+                    run_id=runner.run_id, action_bins=runner.action_bins,
+                    model=_plain(runner.algo_args['model']), reservoir_ids=list(IDS))
+    _save_exclusive(path, dict(metadata, actor=_state_copy(actor)))
+    return dict(path=str(path.resolve()), sha256=_file_hash(path), **metadata)
+
+
 def save_checkpoint(runner, path):
     """Exclusively save the completed policy, without changing runner or RNG state."""
     path = Path(path)
@@ -203,19 +235,7 @@ def save_checkpoint(runner, path):
     payload = dict(format=CHECKPOINT_FORMAT, version=CHECKPOINT_VERSION,
         metadata=metadata, metadata_sha256=_digest(metadata), actors=actor_states,
         critic=critic_state, value_normalizer=normalizer_state)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    created = False
-    try:
-        with path.open('xb') as stream:
-            created = True
-            torch.save(payload, stream)
-    except FileExistsError:
-        raise
-    except BaseException:
-        # Only remove this invocation's incomplete, exclusively-created output.
-        if created:
-            path.unlink()
-        raise
+    _save_exclusive(path, payload)
     return dict(path=str(path.resolve()), sha256=_file_hash(path),
         format=CHECKPOINT_FORMAT, version=CHECKPOINT_VERSION,
         policy_update=int(runner.update_count), policy_stage='post_update',
@@ -445,6 +465,7 @@ class FrozenCascadePolicy:
         rows, rewards, value_history, next_value_history = [], [], [], []
         mixed_rewards, team_rewards, legacy_rewards = [], [], []
         energy, spill, residual = 0., 0., 0.
+        cumulative_deficit = np.zeros(len(IDS))
         energy_by, spill_by = np.zeros(5), np.zeros(5)
         for step in range(1, days+1):
             observations, values = env.actor_observations(), self._values(env.state())
@@ -529,6 +550,14 @@ class FrozenCascadePolicy:
                     ('next_state_level_upper_m', 'next_state_level_upper_m'), ('balance_residual_m3', 'residual')):
                     row[field] = float(transition[source][i])
                 row['spill_volume_m3'] = float(transition['spill'][i]*env.physics.dt)
+                previous = rows[-len(IDS)] if step > 1 else None
+                row['command_delta_bins'] = commands[i] - previous['command_action_index'] if previous else None
+                row['release_delta_m3s'] = row['release_m3s'] - previous['release_m3s'] if previous else None
+                row['storage_change_m3'] = row['storage_end_m3'] - initial[i]
+                deficit = row['ecological_flow_deficit_m3']
+                if deficit is not None:
+                    cumulative_deficit[i] += deficit
+                row['cumulative_ecological_deficit_m3'] = cumulative_deficit[i] if deficit is not None else None
                 rows.append(row)
         remaining = np.zeros(self.critic_output_dim)
         remaining_mixed, remaining_team, remaining_legacy = np.zeros(len(IDS)), 0., 0.

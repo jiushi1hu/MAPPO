@@ -6,6 +6,7 @@ import time
 import numpy as np
 import torch
 
+from harl.models.base.distributions import ACTION_HEADS
 from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
 from harl.algorithms.actors.shared_mappo import make_shared_mappo_agents
 from harl.algorithms.critics.v_critic import VCritic, validate_value_normalization
@@ -76,8 +77,8 @@ class CascadeMAPPORunner(OnPolicyMARunner):
         validate_value_normalization(args['algo']['use_clipped_value_loss'], args['train']['use_valuenorm'])
         self.length = positive_integer(args['train']['episode_length'], 'episode_days')
         self.n_envs = positive_integer(args['train']['n_rollout_threads'], 'parallel_envs')
-        if args['model'].get('action_distribution') != 'categorical':
-            raise ValueError('Cascade controls require categorical discrete actions')
+        if args['model'].get('action_distribution') not in ACTION_HEADS:
+            raise ValueError('Unknown discrete action distribution')
         self.action_bins = positive_integer(args['model'].get('action_bins', 100), 'action_bins')
         if self.action_bins < 2:
             raise ValueError('action_bins must be at least 2')
@@ -381,6 +382,7 @@ class CascadeMAPPORunner(OnPolicyMARunner):
         try:
             self._log_record(dict(self.training_sampler.metadata(), record_type='training_sampling_plan'))
             self.periodic_evaluation()
+            self._save_round_actor()
             for k in range(1, updates+1):
                 if self.algo_args['train']['use_linear_lr_decay']:
                     for actor in self.actor:
@@ -435,6 +437,7 @@ class CascadeMAPPORunner(OnPolicyMARunner):
                         self._progress_number(self._progress_return()),
                         self.last_rollout['episode_energy_TWh'],time.monotonic()-self.started),flush=True)
                 self.periodic_evaluation()
+                self._save_round_actor()
                 if self.checkpoint_dir is not None and (k == updates or
                         (self.checkpoint_interval and k % self.checkpoint_interval == 0)):
                     from harl.envs.cascade_reservoir.checkpoint import save_checkpoint
@@ -450,6 +453,12 @@ class CascadeMAPPORunner(OnPolicyMARunner):
             self.close()
 
     @torch.no_grad()
+    def _save_round_actor(self):
+        if self.algo_args['experiment'].get('save_round_actors', False):
+            from harl.envs.cascade_reservoir.checkpoint import save_round_actor
+            record = save_round_actor(self)
+            self._log_record(dict(record, record_type='round_actor_checkpoint'))
+
     def periodic_evaluation(self):
         """Measure this policy on the fixed evaluation sequence without collection."""
         if (self.periodic_evaluation_history and

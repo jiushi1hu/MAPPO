@@ -18,8 +18,8 @@ model:
   use_feature_normalization: false
   initialization_method: orthogonal_
   gain: 0.01
-  lr: 0.0003
-  critic_lr: 0.0003
+  lr: 0.0005 #原来0.0003
+  critic_lr: 0.0005 #原来0.0003
   opti_eps: 0.00001
   weight_decay: 0
   action_distribution: categorical
@@ -36,13 +36,13 @@ algo:
   use_clipped_value_loss: false
   use_huber_loss: false
   huber_delta: 10.0
-  value_loss_coef: 1
+  value_loss_coef: 0.6 #原来1
   use_max_grad_norm: true
-  max_grad_norm: 0.5
+  max_grad_norm: 10 #原来0.5
   use_gae: true
   use_policy_active_masks: true
   action_aggregation: prod
-  entropy_coef: 0.001
+  entropy_coef: 0.016 #原来0.001
   advantage_normalization: all_rows  # all_rows, active_rows, or none
 experiment:
   collection_mode: five_year_parallel

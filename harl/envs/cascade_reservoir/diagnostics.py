@@ -149,7 +149,10 @@ def after_update(runner, before):
         action = torch.from_numpy(buffer.actions.reshape(-1,1))
         log_ratio = (new.log_probs(action)-old.log_probs(action))[active]
         ratio = log_ratio.exp()
-        kl = torch.distributions.kl_divergence(old,new)[active]
+        # Narrow ordered heads can have finite log probabilities whose exponent
+        # underflows. Both policies use the same stored availability mask.
+        log_difference = (old.logits - new.logits).masked_fill(old.probs == 0, 0.)
+        kl = (old.probs * log_difference).sum(-1)[active]
         grid = torch.linspace(0., 1., new.probs.shape[-1])
         mean = (new.probs[active]*grid).sum(-1, keepdim=True)
         second = (new.probs[active]*grid.square()).sum(-1, keepdim=True)
@@ -159,6 +162,7 @@ def after_update(runner, before):
         require_finite('actor {} ratios'.format(i), ratio.cpu().numpy())
         require_finite('actor {} KL'.format(i), kl.cpu().numpy())
         sampled = action[active]/(new.probs.shape[-1]-1)
+        jump = (old.mode()[active] - new.mode()[active]).abs().float()
         mean_u = float(mean.mean())
         result['actors'].append(dict(agent=i, active_samples=int(active.sum()),
             **update,
@@ -166,6 +170,8 @@ def after_update(runner, before):
             normalized_entropy=float(new.entropy()[active].mean()/np.log(new.probs.shape[-1])),
             mean_max_action_probability=float(top_two[:,0].mean()),
             mean_top_two_probability_gap=float((top_two[:,0]-top_two[:,1]).mean()),
+            mean_abs_mode_jump_bins=float(jump.mean()),
+            max_mode_jump_bins=int(jump.max()),
             mode_change_fraction=float((old.mode()[active] != new.mode()[active]).float().mean()),
             sampled_action_mean=float(sampled.mean()),
             sampled_action_std=float(sampled.std(unbiased=False)),

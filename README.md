@@ -290,6 +290,17 @@ trajectory rows go to `runs/EXPERIMENT_seed<seed>_trajectory.csv`. Optionally ad
 `--checkpoint-interval N` to also save every N completed updates; the default
 of zero saves only the final completed update.
 
+The default `--action-distribution categorical` learns one logit per bin.
+With `--action-distribution ordered_gaussian`, the actor learns a center and
+width in bin units and assigns bin `k` the logit `-0.5 * ((k - μ) / σ)²`.
+Both heads sample discrete bins during collection and use argmax during
+deterministic evaluation. Use `--checkpoint-interval 1 --save-checkpoints`
+with a fresh episode-log path to retain every post-update inference policy.
+With `--diagnostics`, mean and maximum absolute mode jumps compare the two
+policies on the same active rollout observations. Checkpoint replay traces
+record day-to-day command and realized release changes per reservoir, storage
+change since reset, and cumulative observed ecological deficit volume.
+
 Trajectory `update` identifies the optimization batch. Its probabilities and
 entropy come from the frozen **collection** policy, identified separately by
 `collection_policy_update` (one less than `update`) and

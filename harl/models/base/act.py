@@ -1,16 +1,18 @@
 """Categorical action head for the reservoir's scalar discrete controls."""
 import torch.nn as nn
-from harl.models.base.distributions import Categorical
+from harl.models.base.distributions import ACTION_HEADS
 
 
 class ACTLayer(nn.Module):
     """Map actor features to a masked categorical distribution."""
 
-    def __init__(self, action_space, inputs_dim, initialization_method, gain):
+    def __init__(self, action_space, inputs_dim, initialization_method, gain, action_distribution="categorical"):
         super(ACTLayer, self).__init__()
         if action_space.__class__.__name__ != "Discrete":
             raise ValueError("Cascade controls require Discrete actions")
-        self.action_out = Categorical(
+        if action_distribution not in ACTION_HEADS:
+            raise ValueError(f"Unknown action distribution: {action_distribution}")
+        self.action_out = ACTION_HEADS[action_distribution](
             inputs_dim, action_space.n, initialization_method, gain
         )
 

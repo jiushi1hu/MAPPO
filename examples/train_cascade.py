@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import yaml
+from harl.models.base.distributions import ACTION_HEADS
 from harl.common.advantages import NORMALIZATION_LABELS, advantage_mode
 from harl.algorithms.critics.v_critic import validate_value_normalization
 from harl.envs.cascade_reservoir.data_loader import (
@@ -44,6 +45,7 @@ def main(argv=None):
     parser.add_argument('--evaluation-years',nargs='+',type=int,metavar='YEAR',
                         help='Exactly five held-out years; the other 55 years are used for training')
     parser.add_argument('--seeds',nargs='+',type=int)
+    parser.add_argument('--action-distribution', choices=tuple(ACTION_HEADS))
     parser.add_argument('--action-bins',type=int,help='Discrete actions per reservoir (default: 100)')
     parser.add_argument('--flow-observation-scale', type=float,
                         help='Multiplier for capacity-normalized Actor features 2, 11 and 15 (default: 1)')
@@ -77,6 +79,8 @@ def main(argv=None):
                         help='Link all five reservoirs daily physics to frozen own values/advantages; implies --diagnostics and requires --episode-log')
     parser.add_argument('--save-checkpoints',action='store_true',
                         help='Save final-policy actors, centralized critic and value normalization for evaluation replay; requires --episode-log')
+    parser.add_argument('--save-round-actors', action='store_true',
+                        help='Also save actor-only weights at round 0 and each completed update; requires --save-checkpoints')
     parser.add_argument('--checkpoint-interval',type=int,default=0,
                         help='Also save every N completed updates; 0 saves only the final policy; requires --save-checkpoints')
     parser.add_argument('--skip-final-evaluation',action='store_true',help='Reserve evaluation years during tuning')
@@ -96,6 +100,8 @@ def main(argv=None):
         parser.error('--figures-only requires --plot-output and excludes --episode-log')
     if (args.trajectory_diagnostics or args.save_checkpoints) and args.episode_log is None:
         parser.error('--trajectory-diagnostics and --save-checkpoints require --episode-log')
+    if args.save_round_actors and not args.save_checkpoints:
+        parser.error('--save-round-actors requires --save-checkpoints')
     if args.checkpoint_interval < 0:
         parser.error('--checkpoint-interval must be nonnegative')
     if args.checkpoint_interval and not args.save_checkpoints:
@@ -113,6 +119,8 @@ def main(argv=None):
     if args.evaluation_years is not None:
         exp['evaluation_years'] = args.evaluation_years
         exp.pop('evaluation_labels',None)
+    if args.action_distribution is not None:
+        model['action_distribution'] = args.action_distribution
     if args.action_bins is not None:
         model['action_bins'] = args.action_bins
     if args.advantage_normalization is not None:
@@ -146,7 +154,9 @@ def main(argv=None):
         if len(set(exp['seeds'])) != len(exp['seeds']):
             raise ValueError('seeds must be unique')
         model['action_bins'] = positive_integer(model['action_bins'],'action_bins')
-        if model['action_bins'] < 2 or model['action_distribution'] != 'categorical':
+        if model['action_distribution'] not in ACTION_HEADS:
+            raise ValueError('Unknown discrete action distribution')
+        if model['action_bins'] < 2:
             raise ValueError('Categorical control requires at least two action bins')
         algo['gamma'] = validate_discount_factor(algo['gamma'] if args.gamma is None else args.gamma)
         algo['gae_lambda'] = validate_gae_lambda(algo['gae_lambda'] if args.gae_lambda is None else args.gae_lambda)
@@ -174,6 +184,8 @@ def main(argv=None):
     exp['verbose_console'] = args.verbose_console
     exp['trajectory_diagnostics'] = args.trajectory_diagnostics
     exp['save_checkpoints'] = args.save_checkpoints
+    if args.save_round_actors:
+        exp['save_round_actors'] = True
     exp['checkpoint_interval'] = args.checkpoint_interval
     data = CascadeData(args.data_dir,physical,exp)
     return run_parallel_experiment(data, physical, config, args)
